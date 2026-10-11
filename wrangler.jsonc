@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "telegram-paywall-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-06",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Create the database once in the Cloudflare dashboard (Storage & Databases →
+  // D1 SQL Database → Create, name it "telegram-paywall-bot"), then paste its
+  // Database ID below. The ID is not a secret. The Worker creates its own
+  // tables the first time it runs, so there is no migration step.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "telegram-paywall-bot",
+      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+    }
+  ],
+
+  // Runs every minute: expires monthly subscriptions, ends free trials,
+  // and delivers queued /broadcast messages.
+  "triggers": { "crons": ["* * * * *"] },
+
+  // Settings and secrets are managed in the Cloudflare dashboard
+  // (Worker → Settings → Variables and Secrets). keep_vars stops a deploy
+  // from wiping anything you set there. See README.md for the full list.
+  "keep_vars": true,
+
+  // Logs are on. Traces are deliberately off: Telegram puts the bot token in
+  // the request URL, and traces record the URL of every outbound request.
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": false }
+  }
+}
