@@ -13,13 +13,11 @@ It runs as a single Worker with a D1 database. There is no server to keep runnin
 
 You need a Cloudflare account and this repository on GitHub. Nothing has to be installed on your computer.
 
-### 1. Create the database
+### 1. Create the database — done
 
-1. In the Cloudflare dashboard open **Storage & Databases → D1 SQL Database → Create**.
-2. Name it `telegram-paywall-bot` and create it.
-3. Copy its **Database ID** and paste it into [`wrangler.jsonc`](wrangler.jsonc), replacing `REPLACE_WITH_YOUR_D1_DATABASE_ID`. You can do this on GitHub with the pencil icon. The ID is not a secret.
+The D1 database already exists and its ID is set in [`wrangler.jsonc`](wrangler.jsonc). The Worker creates its own tables the first time it runs.
 
-The Worker creates its own tables the first time it runs.
+To move to a different database later: create one under **Storage & Databases → D1 SQL Database → Create**, then replace the `database_id` in `wrangler.jsonc` with the new Database ID. The ID is not a secret.
 
 ### 2. Deploy from GitHub
 

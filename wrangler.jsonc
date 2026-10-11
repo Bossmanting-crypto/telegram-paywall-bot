@@ -5,15 +5,15 @@
   "compatibility_date": "2026-10-06",
   "compatibility_flags": ["nodejs_compat"],
 
-  // Create the database once in the Cloudflare dashboard (Storage & Databases →
-  // D1 SQL Database → Create, name it "telegram-paywall-bot"), then paste its
-  // Database ID below. The ID is not a secret. The Worker creates its own
-  // tables the first time it runs, so there is no migration step.
+  // The D1 database created in the Cloudflare dashboard (Storage & Databases →
+  // D1 SQL Database). The ID is not a secret. To move to a different database,
+  // replace the ID. The Worker creates its own tables the first time it runs,
+  // so there is no migration step.
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "telegram-paywall-bot",
-      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+      "database_id": "8d5bbdd2-a97d-40e8-a448-1d061a19f54c"
     }
   ],
 
