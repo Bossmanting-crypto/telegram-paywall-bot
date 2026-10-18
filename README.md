@@ -4,6 +4,7 @@ A Telegram paywall bot platform that runs on Cloudflare Workers.
 
 - **Your own bot** — people who join your group are restricted until they pay by card / M-Pesa (Paystack) or crypto (NOWPayments, BTCPay). Payment unlocks them automatically.
 - **A platform for other creators** — creators sign up through the API, connect their own bot, group and payment keys, and you record a cut of every payment.
+- **Run it from Claude** — an MCP server lets you, and each creator, manage bots by chatting with Claude or any other MCP client: "who paid this week?", "give @jane free access", "raise the monthly price to $8".
 
 It runs as a single Worker with a D1 database. There is no server to keep running: Telegram and the payment providers call the Worker when something happens.
 
@@ -190,13 +191,55 @@ Webhooks (called by Telegram and the providers, not by you): `/telegram/{bot_id}
 
 ---
 
+## Manage it from Claude (MCP server)
+
+The Worker includes an MCP server at `https://<your-worker-address>/mcp`. Anyone with an account key can connect it to Claude: you with your `ADMIN_API_KEY`, each creator with their own `pbk_…` key. Each person sees only their own bots, and only you see the platform-owner tools.
+
+### Connect Claude
+
+1. In Claude, open **Customize → Connectors → Add custom connector** (on Team and Enterprise plans an owner adds it under **Organization settings → Connectors**).
+2. Enter `https://<your-worker-address>/mcp` and select **Add**, then **Connect**.
+3. A sign-in page opens. Paste your key, check that it names the app you are connecting, and select **Allow**.
+
+Claude Code: `claude mcp add --transport http paywall https://<your-worker-address>/mcp`, then run `/mcp` to sign in.
+
+The key is checked on that page and is never handed to Claude, which gets its own token instead. Rotating a creator key, changing `ADMIN_API_KEY` or suspending a creator ends every connection made with the old key.
+
+### What it can do
+
+| Tool | Does |
+|---|---|
+| `paywall_get_account` | Plan, platform cut, bots, lifetime earnings |
+| `paywall_list_bots`, `paywall_get_bot` | Bots, their prices, group, payment methods, webhook addresses |
+| `paywall_check_bot` | Live check of the bot token, group admin rights and payment keys |
+| `paywall_update_bot` | Change prices, welcome texts, admins; pause or resume |
+| `paywall_list_members` | Paying members, searchable by @username or name |
+| `paywall_grant_access`, `paywall_revoke_access` | Give or remove access, in Telegram too |
+| `paywall_create_payment_link` | A payment link for one person |
+| `paywall_get_payment`, `paywall_list_payments` | Look up orders and completed payments |
+| `paywall_get_revenue` | Revenue, all time and last 30 days |
+| `paywall_send_broadcast` | Message every paying member |
+| `paywall_admin_*` (owner only) | Platform totals, list creators, change a creator's plan, suspend or restore |
+
+Payment-provider keys cannot be read or changed through the MCP server, because anything typed in a chat passes through the AI model and the chat history. Set them through the API or the Cloudflare dashboard.
+
+### Notes
+
+- Sign-in records live in a KV namespace (`OAUTH_KV`) that Cloudflare creates on the first deploy. If that deploy fails with a permissions error about KV, create a namespace under **Storage & Databases → KV**, then add `"id": "<namespace id>"` to the `OAUTH_KV` entry in `wrangler.jsonc`.
+- If you set `APP_URL` (a custom domain), connect Claude with that address, not the `workers.dev` one.
+- KV on the free plan allows 1,000 writes a day. Each sign-in uses a handful, and each connected app refreshes its token about once an hour, so this covers a few dozen active connections. The bot itself does not use KV, so hitting the limit only pauses new MCP sign-ins until the next day.
+- On the free Workers plan, the first MCP request after Cloudflare starts a fresh copy of the Worker uses more CPU than the 10 ms per-request allowance. Cloudflare tolerates occasional overruns; if Claude shows errors such as "Worker exceeded resource limits", the $5/month Workers plan removes the limit. Later requests use a few milliseconds each.
+
+---
+
 ## Security
 
 - Payment webhooks are accepted only with a valid provider signature. Paystack and BTCPay payments are then confirmed again with the provider's own API, and the amount and currency must match the order.
 - A payment is confirmed exactly once, even if a provider delivers the same notification several times.
 - Telegram updates are accepted only with the per-bot secret that was registered with Telegram.
 - Creator API keys are stored as hashes. Creators' bot tokens and payment keys are encrypted in the database with `ENCRYPTION_KEY`. Your own keys live only in Worker secrets.
-- A creator can only see and change their own bots, members and payments.
+- A creator can only see and change their own bots, members and payments, through the API and through the MCP server alike.
+- MCP connections use OAuth 2.1 with PKCE. The sign-in page shows which app is asking and where access will be sent, and cannot be framed or submitted from another site. Tokens, codes and client secrets are stored only as hashes.
 - Signup is open by default. Set `ALLOW_SIGNUPS=false` to close it, or add a Cloudflare rate-limiting rule on `/api/v1/tenants/signup` if it is abused.
 
 ---
@@ -225,6 +268,8 @@ Tests run inside the real Workers runtime with a local D1 database. Telegram and
 | `src/payments.ts` | Create payment links, confirm payments, unlock members |
 | `src/providers/` | Paystack, NOWPayments, BTCPay clients and signature checks |
 | `src/routes/` | API, admin and webhook routes |
+| `src/services.ts` | Operations shared by the API, the MCP tools and the bot |
+| `src/mcp/` | MCP tools and the OAuth sign-in page |
 | `src/checks.ts` | Live credential checks |
 | `src/cron.ts` | Subscription expiry, trial expiry, broadcasts |
 | `src/schema.ts` | Database tables (applied automatically) |
