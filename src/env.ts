@@ -21,6 +21,16 @@ export interface Settings {
   PLATFORM_NAME?: string;
   /** How creators reach you to upgrade, e.g. "@yourname on Telegram" or an email. */
   SUPPORT_CONTACT?: string;
+  /** Most signups allowed from one IP address per hour. Default 20; "0" turns the cap off. */
+  SIGNUP_LIMIT_PER_HOUR?: string;
+  /** Where platform alerts go (Telegram chat IDs). Defaults to ADMIN_USER_IDS. */
+  ALERT_CHAT_ID?: string;
+  /** "off" stops all Telegram alerts. */
+  ALERTS?: string;
+  /** Unpaid platform fees (USD) at which a creator's sales pause until they pay. Unset = never. */
+  FEE_LIMIT_USD?: string;
+  /** Price (USD) of 30 days of the Starter plan, bought in the dashboard. Unset = upgrades by contacting you. */
+  STARTER_PRICE_USD?: string;
 
   // ── Owner bot (same names as the original Python deployment) ────────────────
   TELEGRAM_BOT_TOKEN?: string;
@@ -59,6 +69,8 @@ export const FREE_TRIAL_DAYS = 14;
 export const FREE_MEMBER_LIMIT = 10;
 export const FREE_BOT_LIMIT = 1;
 export const MONTHLY_ACCESS_DAYS = 30;
+/** Length of a self-serve Starter plan period. */
+export const PLAN_DAYS = 30;
 export const MAX_VAULT_IMAGES = 100;
 
 export const TIER_CUT: Record<string, number> = {

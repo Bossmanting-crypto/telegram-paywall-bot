@@ -61,6 +61,11 @@ Optional settings (add as plain **Text** variables; the defaults are shown):
 | `ALLOW_SIGNUPS` | `true` | `false` closes creator signup. |
 | `PLATFORM_NAME` | `Paywall Bot` | Name shown on the landing page and dashboard. |
 | `SUPPORT_CONTACT` | none | How creators reach you to upgrade, e.g. `@yourname on Telegram`. Shown on the landing page and in the dashboard. |
+| `STARTER_PRICE_USD` | none | Price of 30 days of Starter, bought by creators in the dashboard. Unset: creators contact you to upgrade. |
+| `FEE_LIMIT_USD` | none | Unpaid platform fees at which a creator's sales pause until they pay. Unset: sales never pause. |
+| `SIGNUP_LIMIT_PER_HOUR` | `20` | Most signups from one network address per hour. `0` turns the cap off. Bots are welcome either way. |
+| `ALERT_CHAT_ID` | `ADMIN_USER_IDS` | Telegram chat(s) that get platform alerts. |
+| `ALERTS` | on | `off` stops all Telegram alerts. |
 
 ### 4. Run setup and check your credentials
 
@@ -156,7 +161,20 @@ curl -X POST https://<worker>/admin/tenants/<tenant_id>/tier \
   -d '{"tier": "starter"}'
 ```
 
-**How the cut is collected.** Each creator's payments go to that creator's own Paystack / NOWPayments / BTCPay account. The platform records your cut on every payment (`GET /admin/overview`, `GET /admin/tenants`) so you can invoice it. For Paystack only, you can have it routed automatically: the creator adds a *subaccount* in their Paystack dashboard that pays out to you, and you register its code with `POST /admin/tenants/<tenant_id>/paystack-subaccount`. This split has not been exercised against a live Paystack account — try it in Paystack test mode first.
+**How the cut is collected.** Each creator's buyers pay the creator's own Paystack / NOWPayments / BTCPay account, and the platform fee on every sale is added to what the creator owes you.
+
+- **Creators pay in the dashboard:** Account → *Pay fees* creates a payment through **your** Paystack or NOWPayments (the owner bot's keys). It's credited automatically once confirmed (`GET /api/v1/tenants/billing`, `POST /api/v1/tenants/pay-fees`).
+- **Optional limit:** set `FEE_LIMIT_USD` and a creator's sales pause when what they owe reaches it. Their bot warns them at 80% and when paused; paying resumes sales straight away. Paying members keep their access throughout.
+- **Paid some other way?** Creators page → Manage → *Record fees paid* (`POST /admin/tenants/<id>/fees-paid`).
+- **Paystack split (optional):** the creator adds a *subaccount* in their Paystack dashboard that pays out to you, and you register its code (Creators page, or `POST /admin/tenants/<id>/paystack-subaccount`). Fees on those sales reach you automatically and aren't added to what they owe. Not yet exercised against a live Paystack account; try it in test mode first.
+
+**Self-serve Starter.** Set `STARTER_PRICE_USD` and creators can buy 30 days of Starter in the dashboard (or `POST /api/v1/tenants/upgrade {"provider": "paystack"}`). It starts immediately, restarts bots stopped by an ended trial, and renewing adds 30 days. When it runs out, the account goes back to an ended trial and the creator is told through their bot. A plan you set by hand has no end date.
+
+**Lost keys.** A creator sets a *recovery Telegram ID* (at signup, on the Account page, or automatically from the first bot admin). From that Telegram account they send `/accountkey` to any of their bots and get a new key in the chat; the old key stops working. You can also reset a creator's key from the Creators page.
+
+**Alerts.** Problems that cost sales are sent to Telegram, at most once an hour per problem: a creator hears from their own bot when buyers can't get a payment link, when the bot can't mute or admit someone, when a payment notification has a bad signature, and about fees and plan expiry. You get server errors and cron failures.
+
+**For AI agents and other bots.** `/llms.txt` explains the platform and the signup steps in plain text, `/openapi.json` describes the API, and the MCP sign-in page can create an account. Bots are welcome to sign up and run creator accounts.
 
 ### Sign up and create a bot
 

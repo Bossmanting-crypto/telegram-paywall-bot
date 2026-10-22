@@ -635,3 +635,40 @@ describe("MCP sessions end when the key changes", () => {
     expect(res.headers.get("www-authenticate")).toContain("/.well-known/oauth-protected-resource/mcp");
   });
 });
+
+describe("creating an account while connecting", () => {
+  it("offers signup on the sign-in page, shows the new key once, then connects with it", async () => {
+    const pageInfo = await openSignIn();
+    expect(pageInfo.html).toContain("Create a free account");
+
+    const created = await submit(pageInfo, { decision: "signup", name: "Agent Smith", email: "agent@bots.example" });
+    const html = await created.text();
+    expect(created.status, html).toBe(200);
+    const key = /<code[^>]*>(pbk_[0-9a-f]+)<\/code>/.exec(html)?.[1];
+    expect(key).toBeTruthy();
+    expect(html).toContain(`name="key" value="${key}"`);
+
+    const approved = await submit(pageInfo, { decision: "approve", key: key! });
+    expect(approved.status).toBe(302);
+    const code = new URL(approved.headers.get("location")!).searchParams.get("code")!;
+    const { access_token } = await exchange(pageInfo, code);
+    const client = await connect(access_token);
+    const account = await client.callTool({ name: "paywall_get_account", arguments: { response_format: "json" } });
+    expect(textOf(account)).toContain("Agent Smith");
+    await client.close();
+
+    // The same key works on the REST API.
+    expect((await call("GET", "/api/v1/tenants/me", { headers: { "x-api-key": key! } })).body.name).toBe("Agent Smith");
+  });
+
+  it("explains signup problems on the page and keeps what was typed", async () => {
+    await signup(); // any existing account
+    const pageInfo = await openSignIn();
+    const bad = await submit(pageInfo, { decision: "signup", name: "X", email: "not-an-email" });
+    const html = await bad.text();
+    expect(bad.status).toBe(400);
+    expect(html).toContain("not a valid email");
+    expect(html).toContain('value="X"');
+    expect(html).toContain('name="handle"');
+  });
+});

@@ -10,6 +10,8 @@
 import { Hono } from "hono";
 import { loadBot, type PaymentRow } from "../db";
 import { HttpError, log, type AppContext, type Ctx } from "../lib/http";
+import { alertCreator } from "../alerts";
+import { applyFeeLimit } from "../billing";
 import { confirmPayment, deliverAccess, findPayment, findPaymentByInvoice } from "../payments";
 import * as btcpay from "../providers/btcpay";
 import * as nowpayments from "../providers/nowpayments";
@@ -34,7 +36,24 @@ async function settle(c: Ctx, payment: PaymentRow, bot: NonNullable<Awaited<Retu
   if (await confirmPayment(c.env, payment)) {
     // Telegram calls happen after the response so the provider isn't kept waiting.
     c.executionCtx.waitUntil(deliverAccess(c.env, bot, payment.telegram_id, payment.access_type, payment.coins));
+    c.executionCtx.waitUntil(applyFeeLimit(c.env, bot).catch(() => null));
   }
+}
+
+/**
+ * A payment notification with a bad signature is usually a wrong secret,
+ * which means real buyers pay and never get access. Tell the creator.
+ */
+function badSignature(c: Ctx, bot: NonNullable<Awaited<ReturnType<typeof loadBot>>>, provider: string, check: string): void {
+  log("webhook signature rejected", { bot_id: bot.id, provider });
+  c.executionCtx.waitUntil(
+    alertCreator(
+      c.env,
+      bot,
+      `signature-${provider}`,
+      `A ${provider} payment notification was rejected because its signature didn't match. If buyers say they paid but didn't get access, check ${check}.`,
+    ),
+  );
 }
 
 // ── Paystack ─────────────────────────────────────────────────────────────────
@@ -46,6 +65,7 @@ export async function paystackWebhook(c: Ctx, botId: string): Promise<Response> 
 
   const signature = c.req.header("x-paystack-signature") ?? "";
   if (!(await paystack.verifySignature(bot.paystack.secretKey, raw, signature))) {
+    badSignature(c, bot, "Paystack", "your Paystack secret key and that the webhook URL in Paystack belongs to this bot");
     throw new HttpError(400, "Invalid signature");
   }
 
@@ -89,6 +109,7 @@ export async function nowpaymentsWebhook(c: Ctx, botId: string): Promise<Respons
 
   const signature = c.req.header("x-nowpayments-sig") ?? "";
   if (!(await nowpayments.verifySignature(bot.nowpayments.ipnSecret, raw, signature))) {
+    badSignature(c, bot, "NOWPayments", "the IPN secret matches the one in NOWPayments → Settings → IPN");
     throw new HttpError(400, "Invalid signature");
   }
 
@@ -126,6 +147,7 @@ export async function btcpayWebhook(c: Ctx, botId: string): Promise<Response> {
 
   const signature = c.req.header("btcpay-sig") ?? "";
   if (!(await btcpay.verifySignature(bot.btcpay.webhookSecret, raw, signature))) {
+    badSignature(c, bot, "BTCPay", "the webhook secret matches the one in your BTCPay store's webhook settings");
     throw new HttpError(400, "Invalid signature");
   }
 

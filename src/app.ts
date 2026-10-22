@@ -7,6 +7,7 @@ import { handleUpdate } from "./bot/handlers";
 import { loadBot } from "./db";
 import { OWNER_ID, type AppEnv } from "./env";
 import { safeEqual } from "./lib/crypto";
+import { alertOwner } from "./alerts";
 import { HttpError, ProviderError, baseUrl, logError, type AppContext } from "./lib/http";
 import { admin } from "./routes/admin";
 import { analytics } from "./routes/analytics";
@@ -130,6 +131,11 @@ app.onError((error, c) => {
     return c.json({ detail: `${error.provider} error: ${error.message}` }, 502);
   }
   logError("unhandled error", error, { path: c.req.path, method: c.req.method });
+  // Grouped by route so one broken endpoint doesn't send a message per request.
+  const route = c.req.path.split("/").slice(0, 4).join("/");
+  c.executionCtx.waitUntil(
+    alertOwner(c.env, `error:${c.req.method}:${route}`, `Server error on ${c.req.method} ${route}: ${error instanceof Error ? error.message : String(error)}`),
+  );
   return c.json({ detail: "Internal server error" }, 500);
 });
 

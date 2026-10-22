@@ -178,7 +178,7 @@ export const DASHBOARD_JS = String.raw`(function () {
     if (status === "expired") return pill("Trial ended", "bad");
     return pill(status || "unknown");
   }
-  var ACCESS = { one_time: "Lifetime", monthly: "Monthly", manual_grant: "Free, from you", image_unlock: "Image vault", coin_pack: "Coins" };
+  var ACCESS = { one_time: "Lifetime", monthly: "Monthly", manual_grant: "Free, from you", image_unlock: "Image vault", coin_pack: "Coins", platform_fee: "Platform fees", starter_plan: "Starter plan" };
   var PROVIDER = { paystack: "Paystack", nowpayments: "NOWPayments", btcpay: "BTCPay" };
 
   function tile(label, value, note) {
@@ -286,10 +286,13 @@ export const DASHBOARD_JS = String.raw`(function () {
       h("h1", null, "Start your free trial"),
       h("p", { class: "muted" }, "You'll get an account key straight away. No card needed."),
       form(function (v) {
-        return api("POST", "/api/v1/tenants/signup", { name: v.name, email: v.email }).then(showNewKey);
+        var body = { name: v.name, email: v.email };
+        if (v.telegram_id) body.telegram_id = Number(v.telegram_id);
+        return api("POST", "/api/v1/tenants/signup", body).then(showNewKey);
       }, [
         field("Name", name),
         field("Email", input("email", { type: "email", required: true, maxlength: 256, autocomplete: "email", placeholder: "you@example.com" })),
+        field("Your Telegram user ID (optional)", input("telegram_id", { inputmode: "numeric", pattern: "[0-9]*", title: "Numbers only", placeholder: "e.g. 123456789" }), "Lets you get a new key from your bot if you ever lose it. Get it from @userinfobot."),
       ], "Create account"))));
     name.focus();
   }
@@ -344,13 +347,18 @@ export const DASHBOARD_JS = String.raw`(function () {
   function viewOverview() {
     loading();
     var calls = [api("GET", "/api/v1/tenants/me"), api("GET", "/api/v1/analytics/overview"), api("GET", "/api/v1/bots")];
-    if (state.admin) calls.push(api("GET", "/admin/overview"));
+    calls.push(state.admin ? api("GET", "/admin/overview") : api("GET", "/api/v1/tenants/billing"));
     Promise.all(calls).then(function (r) {
-      var me = r[0], ov = r[1], bots = r[2].bots, plat = r[3];
+      var me = r[0], ov = r[1], bots = r[2].bots, plat = state.admin ? r[3] : null, bill = state.admin ? null : r[3];
       state.me = me;
       var allowed = canAddBot(me, bots);
       var out = [pageHead("Hi, " + me.name, state.admin ? "Your own bot and the creators on your platform." : planName(me.tier) + " plan · " + me.platform_cut + " fee per sale")];
       var banner = trialBanner(me); if (banner) out.push(banner);
+      if (bill && bill.billing_hold) {
+        out.push(h("div", { class: "banner bad" }, h("span", null, "Sales are paused: " + money(bill.fees_owed_usd) + " in platform fees is unpaid."), h("a", { href: "#account", class: "btn small" }, "Pay now")));
+      } else if (bill && bill.fee_limit_usd && bill.fees_owed_usd >= bill.fee_limit_usd * 0.8) {
+        out.push(h("div", { class: "banner warn" }, h("span", null, "You owe " + money(bill.fees_owed_usd) + " in platform fees. Sales pause at " + money(bill.fee_limit_usd) + "."), h("a", { href: "#account", class: "btn small" }, "Pay now")));
+      }
       out.push(h("div", { class: "tiles" },
         tile("Earned, last 30 days", money(ov.last_30_days.net), plural(ov.last_30_days.transactions, "sale")),
         tile("Earned, all time", money(ov.all_time.net), ov.all_time.platform_fee > 0 ? "after " + money(ov.all_time.platform_fee) + " in fees" : plural(ov.all_time.transactions, "sale")),
@@ -700,9 +708,62 @@ export const DASHBOARD_JS = String.raw`(function () {
 
   // ── Account ───────────────────────────────────────────────────────────────
 
+  /** Pick a payment method and get a link to the provider's page. */
+  function payControls(providers, label, path) {
+    var box = h("div", { class: "stack" });
+    if (!providers.length) { box.appendChild(h("p", { class: "hint" }, "Online payment isn't set up yet." + (PLATFORM.contact ? " Contact " + PLATFORM.contact + "." : ""))); return box; }
+    var names = { paystack: "Card, bank or M-Pesa (Paystack)", nowpayments: "Crypto (NOWPayments)", btcpay: "Bitcoin (BTCPay)" };
+    var result = h("div");
+    var f = form(function (v) {
+      return api("POST", path, { provider: v.provider }).then(function (res) {
+        result.textContent = "";
+        add(result, h("div", { class: "row" },
+          h("a", { class: "btn primary", href: res.payment_url, target: "_blank", rel: "noopener" }, "Open payment page (" + money(res.amount) + ")"),
+          h("span", { class: "hint" }, "Come back here after paying. It updates within a minute of the payment confirming.")));
+      });
+    }, [field("Pay with", select("provider", providers.map(function (p) { return [p, names[p] || p]; }), providers[0]))], label);
+    add(box, [f, result]);
+    return box;
+  }
+
+  function recoveryPanel(me) {
+    var current = me.recovery_telegram_id;
+    var f = form(function (v) {
+      var value = v.recovery_telegram_id === "" ? null : Number(v.recovery_telegram_id);
+      return api("PATCH", "/api/v1/tenants/me", { recovery_telegram_id: value }).then(function () { toast(value ? "Recovery account saved." : "Recovery account removed."); });
+    }, [field("Your Telegram user ID", input("recovery_telegram_id", { inputmode: "numeric", pattern: "[0-9]*", title: "Numbers only", value: current || "", placeholder: "e.g. 123456789" }), "Get it from @userinfobot. Only this Telegram account can get a new key.")], "Save");
+    return panel("Lost your key?", null,
+      h("p", { class: "muted" }, "If you lose your key, send ", h("code", null, "/accountkey"), " to any of your bots in a private chat from this Telegram account. The bot replies with a new key straight away and your old key stops working."),
+      current ? null : h("p", { class: "banner warn" }, "No recovery account set yet. Add one now so you can't get locked out."),
+      f);
+  }
+
+  function billingPanel(b, me) {
+    var rows = [];
+    if (b.billing_hold) rows.push(h("p", { class: "banner bad" }, "Your bots have stopped selling because " + money(b.fees_owed_usd) + " in platform fees is unpaid. Pay below and sales restart straight away."));
+    rows.push(h("div", { class: "tiles" },
+      tile("Platform fees owed", money(b.fees_owed_usd), b.fee_limit_usd ? "sales pause at " + money(b.fee_limit_usd) : "pay any time"),
+      tile("Fees paid so far", money(b.fees_paid_usd)),
+      tile("Plan", planName(me.tier), b.plan_expires ? "renews by " + day(b.plan_expires) : me.platform_cut + " per sale")));
+    if (b.fees_owed_usd >= 1) rows.push(payControls(b.payment_providers, "Pay " + money(b.fees_owed_usd), "/api/v1/tenants/pay-fees"));
+    if (b.can_buy_starter) {
+      rows.push(h("div", { class: "stack" },
+        h("h3", null, me.tier === "starter" ? "Renew Starter" : "Upgrade to Starter"),
+        h("p", { class: "muted" }, money(b.starter_price_usd) + " for " + b.plan_days + " days: unlimited bots and members, and a lower fee on every sale." + (me.tier === "starter" ? " Renewing adds " + b.plan_days + " days to your current plan." : "")),
+        payControls(b.payment_providers, me.tier === "starter" ? "Renew" : "Upgrade", "/api/v1/tenants/upgrade")));
+    } else if (me.tier === "free") {
+      rows.push(h("p", null, PLATFORM.contact ? "To upgrade, contact " + PLATFORM.contact + " and quote your account ID:" : "To upgrade, contact the platform owner and quote your account ID:"), copyField(me.id));
+    }
+    return panel("Plan and billing", null, rows);
+  }
+  var billingPlaceholder = null;
+
   function viewAccount() {
     loading();
-    api("GET", "/api/v1/tenants/me").then(function (me) {
+    var billing = state.admin ? Promise.resolve(null) : api("GET", "/api/v1/tenants/billing");
+    Promise.all([api("GET", "/api/v1/tenants/me"), billing]).then(function (r) {
+      var me = r[0];
+      billingPlaceholder = r[1] ? billingPanel(r[1], me) : null;
       state.me = me;
       var mcp = location.origin + "/mcp";
       var parts = [pageHead("Account", me.email)];
@@ -720,13 +781,8 @@ export const DASHBOARD_JS = String.raw`(function () {
           });
         }, "danger")));
         parts.push(panel("Account key", null, keyBox));
-        parts.push(panel("Plans", null,
-          h("div", { class: "list" },
-            h("div", null, h("b", null, "Free trial · 15% per sale. "), h("span", { class: "muted" }, "14 days, 1 bot, up to 10 paying members.")),
-            h("div", null, h("b", null, "Starter · 8% per sale. "), h("span", { class: "muted" }, "Unlimited bots and members.")),
-            h("div", null, h("b", null, "White label · 0% per sale. "), h("span", { class: "muted" }, "One-time purchase."))),
-          h("p", null, PLATFORM.contact ? "To upgrade, contact " + PLATFORM.contact + " and quote your account ID:" : "To upgrade, contact the platform owner and quote your account ID:"),
-          copyField(me.id)));
+        parts.push(recoveryPanel(me));
+        parts.push(billingPlaceholder);
       }
       parts.push(panel("Use with Claude", null,
         h("p", { class: "muted" }, "Manage your bots by chatting with Claude or another AI assistant: “who paid this week?”, “raise the monthly price to $8”."),
@@ -744,7 +800,7 @@ export const DASHBOARD_JS = String.raw`(function () {
     loading();
     api("GET", "/admin/tenants").then(function (res) {
       var list = res.tenants;
-      var owed = list.reduce(function (s, t) { return s + (t.platform_fees_usd || 0); }, 0);
+      var owed = list.reduce(function (s, t) { return s + (t.fees_owed_usd || 0); }, 0);
       var rows = list.map(function (t) {
         var detail = h("tr", { hidden: true });
         var manageBtn = h("button", { type: "button", class: "btn small" }, "Manage");
@@ -759,20 +815,33 @@ export const DASHBOARD_JS = String.raw`(function () {
         var splitForm = form(function (v) {
           return api("POST", "/admin/tenants/" + encodeURIComponent(t.id) + "/paystack-subaccount", { code: v.code || null }).then(function (r2) { toast(r2.message); viewCreators(); });
         }, [field("Paystack split code", input("code", { value: t.paystack_subaccount_code || "", placeholder: "ACCT_…", pattern: "ACCT_[A-Za-z0-9]+", title: "Looks like ACCT_xxxxxxxx" }), "Optional. A subaccount in the creator's Paystack that pays your fee to you automatically. Leave blank to remove.")], "Save split", "");
+        var paidForm = form(function (v) {
+          return api("POST", "/admin/tenants/" + encodeURIComponent(t.id) + "/fees-paid", { amount: Number(v.amount) }).then(function (r2) { toast(r2.message); viewCreators(); });
+        }, [field("Record fees paid outside the dashboard ($)", input("amount", { type: "number", step: "0.01", required: true, placeholder: "e.g. 25" }), "For cash or bank transfers. A negative amount corrects a mistake.")], "Record payment", "");
+        var keyBox = h("div", { class: "stack" });
+        var resetKey = confirmButton("Reset their key", "Confirm reset", function () {
+          return api("POST", "/admin/tenants/" + encodeURIComponent(t.id) + "/rotate-key").then(function (r2) {
+            keyBox.textContent = "";
+            add(keyBox, [h("p", { class: "banner warn" }, "Send this key to the creator privately. It won't be shown again."), copyField(r2.api_key, "secret-key")]);
+          });
+        }, "");
         var suspend = confirmButton(t.active ? "Suspend creator" : "Restore creator", "Confirm", function () {
           return api("POST", "/admin/tenants/" + encodeURIComponent(t.id) + "/active", { active: !t.active }).then(function (r2) { toast(r2.message); viewCreators(); });
         }, t.active ? "danger" : "");
-        detail.appendChild(h("td", { colspan: "6" }, h("div", { class: "grid-2" }, planForm, splitForm), h("div", { class: "row" }, suspend, h("span", { class: "hint mono" }, "ID " + t.id))));
+        detail.appendChild(h("td", { colspan: "6" }, h("div", { class: "stack" },
+          h("div", { class: "grid-2" }, planForm, splitForm),
+          h("div", { class: "grid-2" }, paidForm, h("div", { class: "stack" }, h("p", { class: "muted" }, "Owed " + money(t.fees_owed_usd) + " · paid " + money(t.fees_paid_usd) + (t.plan_expires ? " · plan until " + day(t.plan_expires) : "")), keyBox)),
+          h("div", { class: "row" }, resetKey, suspend, h("span", { class: "hint mono" }, "ID " + t.id)))));
         return [h("tr", null,
           h("td", null, h("div", null, h("b", null, t.name)), h("div", { class: "hint" }, t.email)),
           h("td", null, planName(t.tier) + " · " + Math.round(t.platform_cut * 100) + "%", t.tier === "free" && t.trial_ends ? h("div", { class: "hint" }, "trial until " + day(t.trial_ends)) : null),
-          h("td", null, t.active ? pill("Active", "ok") : pill("Suspended", "bad")),
+          h("td", null, !t.active ? pill("Suspended", "bad") : t.billing_hold ? pill("Fees unpaid", "warn") : pill("Active", "ok")),
           h("td", { class: "num" }, String(t.bots)),
-          h("td", { class: "num" }, money(t.processed_usd), h("div", { class: "hint" }, money(t.platform_fees_usd) + " fees")),
+          h("td", { class: "num" }, money(t.processed_usd), h("div", { class: "hint" }, money(t.fees_owed_usd) + " owed")),
           h("td", { class: "num" }, manageBtn)), detail];
       });
-      setMain(pageHead("Creators", plural(res.total, "creator") + " · " + money(owed) + " in fees recorded"),
-        h("p", { class: "banner info" }, "Creators are paid directly by their buyers. Fees are recorded here so you can bill them, or collected automatically for creators with a Paystack split code."),
+      setMain(pageHead("Creators", plural(res.total, "creator") + " · " + money(owed) + " in fees owed to you"),
+        h("p", { class: "banner info" }, "Creators are paid directly by their buyers and pay their fees to you from their dashboard (Account → Pay fees). Fees from creators with a Paystack split code reach you automatically."),
         panel(null, null, list.length ? h("div", { class: "table-wrap" }, h("table", null,
           h("thead", null, h("tr", null, h("th", null, "Creator"), h("th", null, "Plan"), h("th", null, "Status"), h("th", { class: "num" }, "Bots"), h("th", { class: "num" }, "Sales"), h("th", { class: "num" }, ""))),
           h("tbody", null, rows))) : h("p", { class: "empty" }, "No creators yet. Share " + location.origin + " so they can sign up.")));

@@ -21,7 +21,7 @@ import {
   type Tier,
 } from "./db";
 import { FREE_TRIAL_DAYS, OWNER_ID, TIER_CUT, type AppEnv, type Settings } from "./env";
-import { maskSecret, newId } from "./lib/crypto";
+import { maskSecret, newApiKey, newId, sha256Hex } from "./lib/crypto";
 import { HttpError, round2 } from "./lib/http";
 import { availableProviders, deliverAccess, removeAccess, webhookUrl } from "./payments";
 import { countContent } from "./coins";
@@ -70,6 +70,72 @@ export async function accountSummary(env: AppEnv, tenant: TenantRow): Promise<Ac
     feesUsd: round2(fees),
     netUsd: round2(gross - fees),
   };
+}
+
+// ── Signup ───────────────────────────────────────────────────────────────────
+
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const DEFAULT_SIGNUPS_PER_HOUR = 20;
+
+function signupLimit(env: AppEnv): number {
+  const raw = env.SIGNUP_LIMIT_PER_HOUR;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_SIGNUPS_PER_HOUR;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n >= 0 ? n : DEFAULT_SIGNUPS_PER_HOUR;
+}
+
+export interface CreatedTenant {
+  id: string;
+  email: string;
+  name: string;
+  apiKey: string;
+  cut: number;
+  trialEnds: number;
+  recoveryId: number | null;
+}
+
+/**
+ * Create a creator account on the free trial. People and bots are both
+ * welcome; the only limit stops one network address flooding signups
+ * (SIGNUP_LIMIT_PER_HOUR, default 20, "0" for no limit).
+ */
+export async function createTenant(
+  env: AppEnv,
+  input: { email: string; name: string; telegramId: number | null; ip: string },
+): Promise<CreatedTenant> {
+  if (env.ALLOW_SIGNUPS === "false") throw new HttpError(403, "Signups are closed right now.");
+  const email = input.email.trim().toLowerCase();
+  const name = input.name.trim();
+  if (!EMAIL.test(email) || email.length > 256) throw new HttpError(422, "'email' is not a valid email address.");
+  if (!name || name.length > 128) throw new HttpError(422, "'name' is required (up to 128 characters).");
+
+  const existing = await env.DB.prepare("SELECT id FROM tenants WHERE email = ?1").bind(email).first();
+  if (existing) throw new HttpError(400, "Email already registered.");
+
+  const limit = signupLimit(env);
+  const ipHash = input.ip ? await sha256Hex(`signup:${input.ip}`) : null;
+  if (limit > 0 && ipHash) {
+    const recent = await env.DB.prepare("SELECT COUNT(*) AS n FROM tenants WHERE signup_ip_hash = ?1 AND created_at > ?2")
+      .bind(ipHash, now() - 3600)
+      .first<{ n: number }>();
+    if ((recent?.n ?? 0) >= limit) {
+      throw new HttpError(429, `Too many signups from this network in the last hour (limit ${limit}). Try again later.`);
+    }
+  }
+
+  const apiKey = newApiKey();
+  const id = newId();
+  const created = now();
+  const trialEnds = created + FREE_TRIAL_DAYS * 86400;
+  const cut = TIER_CUT.free ?? 0.15;
+  await env.DB.prepare(
+    `INSERT INTO tenants (id, email, name, api_key_hash, api_key_prefix, tier, platform_cut, trial_ends_at, created_at,
+                          recovery_telegram_id, signup_ip_hash)
+     VALUES (?1, ?2, ?3, ?4, ?5, 'free', ?6, ?7, ?8, ?9, ?10)`,
+  )
+    .bind(id, email, name, await sha256Hex(apiKey), apiKey.slice(0, 12), cut, trialEnds, created, input.telegramId, ipHash)
+    .run();
+  return { id, email, name, apiKey, cut, trialEnds, recoveryId: input.telegramId };
 }
 
 export interface RevenueOverview {
@@ -643,6 +709,10 @@ export interface CreatorView {
   processed_usd: number;
   platform_fees_usd: number;
   paystack_subaccount_code: string | null;
+  fees_paid_usd: number;
+  fees_owed_usd: number;
+  billing_hold: boolean;
+  plan_expires: string | null;
   created_at: string | null;
 }
 
@@ -657,7 +727,10 @@ export async function listCreators(
               t.paystack_subaccount_code,
               (SELECT COUNT(*) FROM bots b WHERE b.tenant_id = t.id AND b.status != 'deleted') AS bots,
               (SELECT COALESCE(SUM(p.gross_amount), 0) FROM payments p WHERE p.tenant_id = t.id AND p.status = 'confirmed') AS gross,
-              (SELECT COALESCE(SUM(p.platform_fee), 0) FROM payments p WHERE p.tenant_id = t.id AND p.status = 'confirmed') AS fees
+              (SELECT COALESCE(SUM(p.platform_fee), 0) FROM payments p WHERE p.tenant_id = t.id AND p.status = 'confirmed') AS fees,
+              (SELECT COALESCE(SUM(p.platform_fee), 0) FROM payments p WHERE p.tenant_id = t.id AND p.status = 'confirmed'
+                 AND p.fee_collected = 0 AND p.access_type NOT IN ('platform_fee', 'starter_plan')) AS fees_due,
+              t.fees_paid_usd, t.billing_hold, t.plan_expires_at
        FROM tenants t WHERE t.id != ?1 ORDER BY t.created_at DESC, t.id LIMIT ?2 OFFSET ?3`,
     ).bind(OWNER_ID, opts.limit, opts.offset),
     env.DB.prepare("SELECT COUNT(*) AS n FROM tenants WHERE id != ?1").bind(OWNER_ID),
@@ -675,6 +748,10 @@ export async function listCreators(
     bots: number;
     gross: number;
     fees: number;
+    fees_due: number;
+    fees_paid_usd: number;
+    billing_hold: number;
+    plan_expires_at: number | null;
   };
   const rows = (page?.results ?? []) as Row[];
   const total = ((count?.results ?? [])[0] as { n: number } | undefined)?.n ?? 0;
@@ -692,9 +769,23 @@ export async function listCreators(
       processed_usd: round2(t.gross),
       platform_fees_usd: round2(t.fees),
       paystack_subaccount_code: t.paystack_subaccount_code,
+      fees_paid_usd: round2(t.fees_paid_usd ?? 0),
+      fees_owed_usd: round2(Math.max(0, (t.fees_due ?? 0) - (t.fees_paid_usd ?? 0))),
+      billing_hold: t.billing_hold === 1,
+      plan_expires: iso(t.plan_expires_at),
       created_at: iso(t.created_at),
     })),
   };
+}
+
+/** Give a creator a new API key (the old one stops working at once). Returns the new key. */
+export async function rotateTenantKey(env: AppEnv, id: string): Promise<string> {
+  const apiKey = newApiKey();
+  const result = await env.DB.prepare("UPDATE tenants SET api_key_hash = ?1, api_key_prefix = ?2 WHERE id = ?3 AND id != ?4")
+    .bind(await sha256Hex(apiKey), apiKey.slice(0, 12), id, OWNER_ID)
+    .run();
+  if (result.meta.changes === 0) throw new HttpError(404, "Tenant not found.");
+  return apiKey;
 }
 
 async function requireCreator(env: AppEnv, id: string): Promise<void> {
@@ -714,7 +805,8 @@ export async function setCreatorPlan(
   const cut = platformCut ?? TIER_CUT[tier] ?? 0;
   const trialEnds = tier === "free" ? now() + FREE_TRIAL_DAYS * 86400 : null;
   await env.DB.batch([
-    env.DB.prepare("UPDATE tenants SET tier = ?1, platform_cut = ?2, trial_ends_at = ?3 WHERE id = ?4").bind(
+    // A plan set by the owner has no end date.
+    env.DB.prepare("UPDATE tenants SET tier = ?1, platform_cut = ?2, trial_ends_at = ?3, plan_expires_at = NULL WHERE id = ?4").bind(
       tier,
       cut,
       trialEnds,

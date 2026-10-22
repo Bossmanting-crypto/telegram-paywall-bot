@@ -5,7 +5,7 @@
  * script.
  */
 
-import { FREE_BOT_LIMIT, FREE_MEMBER_LIMIT, FREE_TRIAL_DAYS, TIER_CUT, type AppEnv } from "../env";
+import { FREE_BOT_LIMIT, FREE_MEMBER_LIMIT, FREE_TRIAL_DAYS, PLAN_DAYS, TIER_CUT, type AppEnv } from "../env";
 
 export interface PlatformInfo {
   name: string;
@@ -50,7 +50,7 @@ function brand(info: PlatformInfo, href: string): string {
   return `<a class="brand" href="${href}"><span class="brand-mark" aria-hidden="true">✓</span>${esc(info.name)}</a>`;
 }
 
-export function landingPage(info: PlatformInfo): string {
+export function landingPage(info: PlatformInfo, starterPrice: number | null = null): string {
   const free = pct(TIER_CUT.free, 0.15);
   const starter = pct(TIER_CUT.starter, 0.08);
   const cta = info.signupsOpen
@@ -60,7 +60,10 @@ export function landingPage(info: PlatformInfo): string {
     ? `<p>Questions or upgrades: <span class="mono">${esc(info.contact)}</span></p>`
     : "";
 
-  return `${head(`${info.name} · Get paid for your Telegram group`, '<meta name="description" content="A Telegram bot that charges for access to your group. Card, M-Pesa and crypto payments.">')}
+  return `${head(
+    `${info.name} · Get paid for your Telegram group`,
+    '<meta name="description" content="A Telegram bot that charges for access to your group. Card, M-Pesa and crypto payments.">\n<link rel="alternate" type="text/plain" title="Guide for AI agents" href="/llms.txt">\n<link rel="service-desc" type="application/json" href="/openapi.json">',
+  )}
 <body>
 <header class="topbar"><div class="wrap">
   ${brand(info, "/")}
@@ -107,7 +110,7 @@ export function landingPage(info: PlatformInfo): string {
         <div class="plan featured">
           <h3>Starter</h3>
           <div class="fee">${starter} <small>per sale</small></div>
-          <ul><li>Unlimited bots</li><li>Unlimited members</li><li>Lower fee on every sale</li></ul>
+          <ul><li>Unlimited bots</li><li>Unlimited members</li><li>${starterPrice !== null ? `$${starterPrice.toFixed(2)} per ${PLAN_DAYS} days, upgrade in one click` : "Lower fee on every sale"}</li></ul>
         </div>
         <div class="plan">
           <h3>White label</h3>
@@ -121,6 +124,7 @@ export function landingPage(info: PlatformInfo): string {
 <footer><div class="wrap stack">
   ${contact}
   <p>${esc(info.name)} runs on Cloudflare. Payment keys are stored encrypted.</p>
+  <p>Building an agent or bot? Read <a href="/llms.txt">/llms.txt</a>, the <a href="/openapi.json">API description</a>, or connect the MCP server at <span class="mono">/mcp</span>. Bots are welcome to sign up.</p>
 </div></footer>
 </body>
 </html>`;

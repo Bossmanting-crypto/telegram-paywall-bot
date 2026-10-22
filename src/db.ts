@@ -12,7 +12,7 @@ export type Tier = "free" | "starter" | "whitelabel";
 export type BotStatus = "active" | "paused" | "expired" | "deleted";
 export type AccessType = "one_time" | "monthly" | "image_unlock";
 /** What a payment bought: an access plan, or a pack of coins. */
-export type PaymentKind = AccessType | "coin_pack";
+export type PaymentKind = AccessType | "coin_pack" | "platform_fee" | "starter_plan";
 export type JoinMode = "mute" | "approve";
 export type ContentKind = "photo" | "video" | "animation" | "document";
 
@@ -45,6 +45,11 @@ export interface TenantRow {
   is_active: number;
   trial_ends_at: number | null;
   paystack_subaccount_code: string | null;
+  recovery_telegram_id: number | null;
+  fees_paid_usd: number;
+  billing_hold: number;
+  plan_expires_at: number | null;
+  signup_ip_hash: string | null;
   created_at: number;
 }
 
@@ -117,6 +122,8 @@ export interface PaymentRow {
   charge_amount_minor: number | null;
   charge_currency: string | null;
   status: "pending" | "confirmed" | "failed";
+  fee_collected: number;
+  for_tenant_id: string | null;
   payment_url: string | null;
   created_at: number;
   confirmed_at: number | null;
@@ -150,6 +157,8 @@ export interface BotConfig {
   tier: Tier;
   platformCut: number;
   tenantActive: boolean;
+  /** Sales paused until the creator pays platform fees they owe. */
+  billingHold: boolean;
   trialEndsAt: number | null;
   lastNoticeMessageId: number | null;
   joinMode: JoinMode;
@@ -186,6 +195,7 @@ type BotJoinRow = BotRow & {
   t_is_active: number;
   t_trial_ends_at: number | null;
   t_paystack_subaccount_code: string | null;
+  t_billing_hold: number;
 };
 
 const BOT_JOIN_SQL = `
@@ -194,7 +204,8 @@ const BOT_JOIN_SQL = `
          t.platform_cut AS t_platform_cut,
          t.is_active AS t_is_active,
          t.trial_ends_at AS t_trial_ends_at,
-         t.paystack_subaccount_code AS t_paystack_subaccount_code
+         t.paystack_subaccount_code AS t_paystack_subaccount_code,
+         t.billing_hold AS t_billing_hold
   FROM bots b JOIN tenants t ON t.id = b.tenant_id`;
 
 function envNumber(value: string | undefined): number | undefined {
@@ -249,6 +260,7 @@ async function resolveBot(env: AppEnv, row: BotJoinRow): Promise<BotConfig> {
     tier: row.t_tier,
     platformCut: row.t_platform_cut,
     tenantActive: row.t_is_active === 1,
+    billingHold: row.t_billing_hold === 1,
     trialEndsAt: row.t_trial_ends_at,
     lastNoticeMessageId: row.last_notice_message_id,
     joinMode: (row.join_mode === "approve" ? "approve" : "mute") as JoinMode,
@@ -369,7 +381,7 @@ export async function loadTenantBot(env: AppEnv, botId: string, tenantId: string
 }
 
 export function botIsSelling(bot: BotConfig): boolean {
-  return bot.status === "active" && bot.tenantActive && bot.token !== "";
+  return bot.status === "active" && bot.tenantActive && !bot.billingHold && bot.token !== "";
 }
 
 // ── Members ──────────────────────────────────────────────────────────────────

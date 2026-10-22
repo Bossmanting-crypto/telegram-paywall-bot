@@ -180,6 +180,33 @@ export const MIGRATIONS: string[][] = [
        PRIMARY KEY (bot_id, telegram_id, item_id)
      )`,
   ],
+
+  // ── 3: key recovery, fee collection, self-serve plans, alerts ──────────────
+  [
+    // Telegram account allowed to request a new API key from the creator's bot.
+    `ALTER TABLE tenants ADD COLUMN recovery_telegram_id INTEGER`,
+    // Platform fees the creator has paid to the owner (USD).
+    `ALTER TABLE tenants ADD COLUMN fees_paid_usd REAL NOT NULL DEFAULT 0`,
+    // 1 while sales are paused because unpaid fees reached FEE_LIMIT_USD.
+    `ALTER TABLE tenants ADD COLUMN billing_hold INTEGER NOT NULL DEFAULT 0`,
+    // When a self-serve Starter plan runs out (NULL = no end date).
+    `ALTER TABLE tenants ADD COLUMN plan_expires_at INTEGER`,
+    // SHA-256 of the signup IP, only to cap signups per hour.
+    `ALTER TABLE tenants ADD COLUMN signup_ip_hash TEXT`,
+    `CREATE INDEX IF NOT EXISTS idx_tenants_signup_ip ON tenants(signup_ip_hash, created_at)`,
+
+    // 1 when the platform fee reached the owner automatically (Paystack split).
+    `ALTER TABLE payments ADD COLUMN fee_collected INTEGER NOT NULL DEFAULT 0`,
+    // Payments made to the owner by a creator (fees or a plan): which creator.
+    `ALTER TABLE payments ADD COLUMN for_tenant_id TEXT`,
+
+    // Throttle for Telegram alerts: one message per key per hour.
+    `CREATE TABLE IF NOT EXISTS alerts (
+       key          TEXT PRIMARY KEY,
+       last_sent_at INTEGER NOT NULL,
+       suppressed   INTEGER NOT NULL DEFAULT 0
+     )`,
+  ],
 ];
 
 // Per-isolate flag so the version check runs once per cold start, not per request.

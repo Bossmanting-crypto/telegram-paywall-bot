@@ -9,6 +9,8 @@
  * picked up on the next run a minute later.
  */
 
+import { alertCreator } from "./alerts";
+import { expireStarterPlans } from "./billing";
 import { loadBot, now, type BotConfig } from "./db";
 import type { AppEnv } from "./env";
 import { log, logError } from "./lib/http";
@@ -31,7 +33,10 @@ export async function runCron(env: AppEnv, scheduledTime: number): Promise<void>
   };
 
   await expireSubscriptions(env, bot);
-  if (new Date(scheduledTime).getUTCMinutes() % 15 === 0) await expireTrials(env);
+  if (new Date(scheduledTime).getUTCMinutes() % 15 === 0) {
+    await endStarterPlans(env, bot);
+    await expireTrials(env);
+  }
   await deliverBroadcast(env, bot);
 }
 
@@ -75,6 +80,23 @@ async function expireSubscriptions(
       { reply_markup: { inline_keyboard: [[{ text: "🔄 Renew access", callback_data: "start_pay" }]] } },
     ).catch(() => undefined);
     log("subscription expired", { bot_id: m.bot_id, telegram_id: m.telegram_id });
+  }
+}
+
+/** Self-serve Starter plans that ran out: back to an ended trial, and tell the creator. */
+async function endStarterPlans(env: AppEnv, bot: (id: string) => Promise<BotConfig | null>): Promise<void> {
+  const ended = await expireStarterPlans(env, now());
+  for (const tenantId of ended) {
+    log("starter plan ended", { tenant_id: tenantId });
+    const { results } = await env.DB.prepare("SELECT id FROM bots WHERE tenant_id = ?1 AND status = 'active'")
+      .bind(tenantId)
+      .all<{ id: string }>();
+    for (const row of results) {
+      const config = await bot(row.id);
+      if (config) {
+        await alertCreator(env, config, "plan-ended", "Your Starter plan has ended, so this bot has stopped selling. Renew it in the dashboard (Account) to start again. Paying members keep their access.");
+      }
+    }
   }
 }
 

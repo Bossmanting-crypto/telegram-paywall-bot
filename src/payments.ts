@@ -6,6 +6,8 @@
 import {
   FREE_MEMBER_LIMIT,
   MAX_VAULT_IMAGES,
+  PLAN_DAYS,
+  TIER_CUT,
   type AppEnv,
 } from "./env";
 import {
@@ -23,6 +25,7 @@ import {
   type PaymentRow,
   type Provider,
 } from "./db";
+import { alertCreator } from "./alerts";
 import { balance, coinPurchaseStatements, sendContent, type ContentItem } from "./coins";
 import { newId, randomHex } from "./lib/crypto";
 import { HttpError, log, logError, round2 } from "./lib/http";
@@ -141,7 +144,8 @@ export async function createCoinPayment(
   return { ...created, coins: pack.coins };
 }
 
-async function startPayment(
+/** Create the order and the provider's payment page. Shared by every kind of payment. */
+export async function startPayment(
   env: AppEnv,
   bot: BotConfig,
   opts: {
@@ -153,19 +157,31 @@ async function startPayment(
     provider: Provider;
     baseUrl: string;
     email?: string | null;
+    /** Payments a creator makes to the owner: the creator's tenant ID. */
+    forTenantId?: string | null;
+    /** Where the payer's browser returns afterwards. */
+    successPath?: string;
+    /** Order reference prefix (default: the Telegram user ID). */
+    refPrefix?: string;
   },
 ): Promise<CreatedPayment> {
   const amount = opts.amount;
   const platformFee = round2(amount * bot.platformCut);
   const net = round2(amount - platformFee);
   // Paystack references may only contain letters, digits, "-", "." and "=".
-  const orderId = `${opts.telegramId}-${randomHex(6)}`;
+  const orderId = `${opts.refPrefix ?? opts.telegramId}-${randomHex(6)}`;
   const description = opts.description;
-  const successUrl = `${opts.baseUrl}/payment/success`;
+  const successUrl = `${opts.baseUrl}${opts.successPath ?? "/payment/success"}`;
   const cancelUrl = `${opts.baseUrl}/payment/cancel`;
 
   const chargeMinor = opts.provider === "paystack" ? paystack.toMinorUnits(amount, bot.fxRate) : null;
   const chargeCurrency = opts.provider === "paystack" ? bot.currency : null;
+  // Paystack split: the platform fee goes straight to the owner's subaccount.
+  const feeMinor = chargeMinor !== null ? paystack.toMinorUnits(platformFee, bot.fxRate) : 0;
+  const split =
+    opts.provider === "paystack" && chargeMinor !== null && bot.paystack?.subaccount && feeMinor > 0
+      ? { subaccount: bot.paystack.subaccount, mainAccountShareMinor: chargeMinor - feeMinor }
+      : null;
 
   // Record the order before calling the provider, so a payment can never
   // arrive for an order we have no record of.
@@ -174,8 +190,8 @@ async function startPayment(
     `INSERT INTO payments
        (id, tenant_id, bot_id, telegram_id, provider, provider_ref, access_type,
         gross_amount, platform_fee, net_amount, currency,
-        charge_amount_minor, charge_currency, status, created_at, coins)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'USD', ?11, ?12, 'pending', ?13, ?14)`,
+        charge_amount_minor, charge_currency, status, created_at, coins, fee_collected, for_tenant_id)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'USD', ?11, ?12, 'pending', ?13, ?14, ?15, ?16)`,
   )
     .bind(
       paymentId,
@@ -192,6 +208,8 @@ async function startPayment(
       chargeCurrency,
       now(),
       opts.coins,
+      split ? 1 : 0,
+      opts.forTenantId ?? null,
     )
     .run();
 
@@ -199,7 +217,6 @@ async function startPayment(
   let invoiceId: string | null = null;
   try {
     if (opts.provider === "paystack" && bot.paystack && chargeMinor !== null) {
-      const feeMinor = paystack.toMinorUnits(platformFee, bot.fxRate);
       const result = await paystack.initializeTransaction(bot.paystack.secretKey, {
         email: opts.email || `${opts.telegramId}@telegram.user`,
         amountMinor: chargeMinor,
@@ -209,10 +226,7 @@ async function startPayment(
         cancelUrl,
         description,
         channels: bot.paystackChannels,
-        split:
-          bot.paystack.subaccount && feeMinor > 0
-            ? { subaccount: bot.paystack.subaccount, mainAccountShareMinor: chargeMinor - feeMinor }
-            : null,
+        split,
       });
       paymentUrl = result.paymentUrl;
     } else if (opts.provider === "nowpayments" && bot.nowpayments) {
@@ -281,9 +295,11 @@ export async function confirmPayment(env: AppEnv, payment: PaymentRow): Promise<
   const grant =
     payment.access_type === "coin_pack"
       ? coinPurchaseStatements(env, payment)
-      : payment.access_type === "image_unlock"
-        ? [vaultUnlockStatement(env, payment.bot_id, payment.telegram_id, payment.id)]
-        : [memberGrantStatement(env, payment.bot_id, payment.telegram_id, payment.access_type, payment.id)];
+      : payment.access_type === "platform_fee" || payment.access_type === "starter_plan"
+        ? platformPaymentStatements(env, payment)
+        : payment.access_type === "image_unlock"
+          ? [vaultUnlockStatement(env, payment.bot_id, payment.telegram_id, payment.id)]
+          : [memberGrantStatement(env, payment.bot_id, payment.telegram_id, payment.access_type, payment.id)];
 
   const results = await env.DB.batch([
     ...grant,
@@ -305,6 +321,41 @@ export async function confirmPayment(env: AppEnv, payment: PaymentRow): Promise<
   return confirmed;
 }
 
+/**
+ * A creator paid the owner: record fees as paid (and lift a billing hold), or
+ * start / extend 30 days of Starter. Only takes effect while the payment is
+ * pending, so run it in the batch that confirms the payment.
+ */
+function platformPaymentStatements(env: AppEnv, payment: PaymentRow): D1PreparedStatement[] {
+  const tenantId = payment.for_tenant_id;
+  if (!tenantId) return [];
+  const pending = "EXISTS (SELECT 1 FROM payments WHERE id = ?2 AND status = 'pending')";
+  if (payment.access_type === "platform_fee") {
+    return [
+      env.DB.prepare(
+        `UPDATE tenants SET fees_paid_usd = fees_paid_usd + ?3, billing_hold = 0 WHERE id = ?1 AND ${pending}`,
+      ).bind(tenantId, payment.id, payment.gross_amount),
+    ];
+  }
+  const at = now();
+  const period = PLAN_DAYS * 86400;
+  return [
+    env.DB.prepare(
+      `UPDATE tenants SET
+         platform_cut = MIN(platform_cut, ?3),
+         trial_ends_at = NULL,
+         plan_expires_at = CASE
+           WHEN tier = 'starter' AND plan_expires_at IS NOT NULL AND plan_expires_at > ?4 THEN plan_expires_at + ?5
+           ELSE ?4 + ?5 END,
+         tier = 'starter'
+       WHERE id = ?1 AND tier IN ('free', 'starter') AND ${pending}`,
+    ).bind(tenantId, payment.id, TIER_CUT.starter ?? 0.08, at, period),
+    env.DB.prepare(
+      `UPDATE bots SET status = 'active' WHERE tenant_id = ?1 AND status = 'expired' AND ${pending}`,
+    ).bind(tenantId, payment.id),
+  ];
+}
+
 // ── Telegram side effects ────────────────────────────────────────────────────
 
 /**
@@ -318,6 +369,8 @@ export async function deliverAccess(
   accessType: PaymentKind | "manual_grant",
   coins: number | null = null,
 ): Promise<void> {
+  // Payments to the platform have no Telegram buyer; the dashboard shows the result.
+  if (accessType === "platform_fee" || accessType === "starter_plan") return;
   if (!bot.token) return;
   if (accessType === "coin_pack") {
     try {
@@ -349,6 +402,7 @@ export async function deliverAccess(
     // Expected in approve mode when the buyer isn't in the group yet.
     if (bot.joinMode !== "approve") {
       logError("could not unlock member in Telegram", error, { bot_id: bot.id, telegram_id: telegramId });
+      await alertCreator(env, bot, "unlock", `Someone has paid but I couldn't unmute them in the group (user ${telegramId}). Make sure I'm still an admin with the Ban users permission. They can send /start to me to retry once that's fixed.`);
     }
   }
 
@@ -359,6 +413,9 @@ export async function deliverAccess(
   let keyboard: InlineKeyboard | undefined;
   if (bot.joinMode === "approve" && bot.groupChatId) {
     const admitted = await admitToGroup(bot, telegramId);
+    if (!admitted.approved && !admitted.inviteLink) {
+      await alertCreator(env, bot, "admit", `Someone has paid but I couldn't let them into the group (user ${telegramId}). Give me the Invite users via link permission, then use /grant ${telegramId} to send them in.`);
+    }
     if (admitted.approved) {
       text = `${accessType === "manual_grant" ? "✅ <b>Access granted!</b>" : "✅ <b>Payment confirmed!</b>"} Your request to join was approved. Open the group from your chat list. 🎉`;
     } else if (admitted.inviteLink) {
