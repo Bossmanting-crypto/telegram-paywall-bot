@@ -174,6 +174,8 @@ curl -X POST https://<worker>/admin/tenants/<tenant_id>/tier \
 
 **Alerts.** Problems that cost sales are sent to Telegram, at most once an hour per problem: a creator hears from their own bot when buyers can't get a payment link, when the bot can't mute or admit someone, when a payment notification has a bad signature, and about fees and plan expiry. You get server errors and cron failures.
 
+**Public site.** `/` is the homepage and `/guides` holds short guides, one per niche and per key search (M-Pesa, pay-per-post, streamers, tutors, coaches, alert groups, AI agents). Add a guide by appending to `GUIDES` in `src/web/guides.ts`; it appears in the guides index, footer, `/sitemap.xml` and `/llms.txt` automatically. Prices and limits on every page come from the code and your settings. Fonts (Newsreader and Hanken Grotesk, SIL Open Font License) are served from the Worker.
+
 **For AI agents and other bots.** `/llms.txt` explains the platform and the signup steps in plain text, `/openapi.json` describes the API, and the MCP sign-in page can create an account. Bots are welcome to sign up and run creator accounts.
 
 ### Sign up and create a bot

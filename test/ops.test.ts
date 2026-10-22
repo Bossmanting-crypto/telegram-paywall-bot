@@ -143,7 +143,8 @@ describe("signup for people and bots", () => {
   it("lists Starter's price on the landing page and in the guide when it is set", async () => {
     const priced = envWith({ STARTER_PRICE_USD: "12" });
     const page = await call("GET", "/", { headers: { accept: "text/html" }, env: priced });
-    expect(page.text).toContain("$12.00 per 30 days");
+    expect(page.text).toContain("$12 per 30 days");
+    expect(page.text).not.toContain("No monthly fee");
     expect((await call("GET", "/llms.txt", { env: priced })).text).toContain("$12.00 per 30 days");
   });
 });

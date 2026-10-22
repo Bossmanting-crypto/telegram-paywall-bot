@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { DASHBOARD_JS } from "../src/web/dashboard-client";
+import { GUIDES } from "../src/web/guides";
 import { esc } from "../src/web/pages";
 import { call, envWith, mockFetch, resetDatabase } from "./helpers";
 
@@ -15,7 +16,7 @@ describe("landing page", () => {
     const page = await call("GET", "/", { headers: HTML });
     expect(page.status).toBe(200);
     expect(page.headers.get("content-type")).toContain("text/html");
-    expect(page.text).toContain("Get paid for your Telegram group");
+    expect(page.text).toContain("Your Telegram group, now a <em>business</em>.");
     expect(page.text).toContain('href="/dashboard#signup"');
 
     const api = await call("GET", "/");
@@ -109,5 +110,65 @@ describe("dashboard", () => {
 describe("esc", () => {
   it("escapes text and attribute characters", () => {
     expect(esc(`<a href="x" onclick='y'>&</a>`)).toBe("&lt;a href=&quot;x&quot; onclick=&#39;y&#39;&gt;&amp;&lt;/a&gt;");
+  });
+});
+
+describe("public site", () => {
+  it("says there's no monthly fee only when Starter has no price", async () => {
+    const page = await call("GET", "/", { headers: HTML });
+    expect(page.text).toContain("No monthly fee");
+    expect(page.text).toContain('<link rel="canonical" href="https://paywall.test/">');
+    expect(page.headers.get("content-security-policy")).toContain("font-src 'self'");
+  });
+
+  it("serves every guide, linked from the index, the homepage and the sitemap", async () => {
+    const index = await call("GET", "/guides");
+    expect(index.status).toBe(200);
+    const sitemap = await call("GET", "/sitemap.xml");
+    expect(sitemap.headers.get("content-type")).toContain("application/xml");
+    for (const g of GUIDES) {
+      const res = await call("GET", `/guides/${g.slug}`);
+      expect(res.status, g.slug).toBe(200);
+      expect(res.text).toContain(`<link rel="canonical" href="https://paywall.test/guides/${g.slug}">`);
+      expect(res.text).toContain(`<meta name="description" content="${esc(g.description)}">`);
+      expect(index.text).toContain(`href="/guides/${g.slug}"`);
+      expect(sitemap.text).toContain(`<loc>https://paywall.test/guides/${g.slug}</loc>`);
+      for (const r of g.related) expect(GUIDES.some((x) => x.slug === r), `${g.slug} → ${r}`).toBe(true);
+    }
+    // Every guide link on the homepage points at a real guide.
+    const home = await call("GET", "/", { headers: HTML });
+    for (const m of home.text.matchAll(/href="\/guides\/([a-z0-9-]+)"/g)) {
+      expect(GUIDES.some((g) => g.slug === m[1]), m[1]).toBe(true);
+    }
+  });
+
+  it("sends unknown guides back to the index", async () => {
+    const res = await call("GET", "/guides/nope");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/guides");
+  });
+
+  it("tells crawlers what to index", async () => {
+    const robots = await call("GET", "/robots.txt");
+    expect(robots.text).toContain("Disallow: /dashboard");
+    expect(robots.text).toContain("Sitemap: https://paywall.test/sitemap.xml");
+  });
+
+  it("serves its own fonts", async () => {
+    for (const f of ["newsreader.woff2", "newsreader-italic.woff2", "hanken-grotesk.woff2"]) {
+      const res = await call("GET", `/assets/fonts/${f}`);
+      expect(res.status, f).toBe(200);
+      expect(res.headers.get("content-type")).toBe("font/woff2");
+      expect(res.text.startsWith("wOF2")).toBe(true);
+    }
+    expect((await call("GET", "/assets/fonts/other.woff2")).status).toBe(404);
+  });
+
+  it("is honest with agents about the steps that need a person", async () => {
+    const guide = await call("GET", "/llms.txt");
+    expect(guide.text).not.toMatch(/no human/i);
+    expect(guide.text).toContain("ask your human for");
+    expect(guide.text).toContain("@BotFather");
+    for (const g of GUIDES) expect(guide.text).toContain(`/guides/${g.slug}`);
   });
 });
