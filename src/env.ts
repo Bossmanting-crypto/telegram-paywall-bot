@@ -17,6 +17,10 @@ export interface Settings {
   CORS_ORIGINS?: string;
   /** Set to "false" to close public signup. */
   ALLOW_SIGNUPS?: string;
+  /** Name shown on the public pages. Defaults to "Paywall Bot". */
+  PLATFORM_NAME?: string;
+  /** How creators reach you to upgrade, e.g. "@yourname on Telegram" or an email. */
+  SUPPORT_CONTACT?: string;
 
   // ── Owner bot (same names as the original Python deployment) ────────────────
   TELEGRAM_BOT_TOKEN?: string;

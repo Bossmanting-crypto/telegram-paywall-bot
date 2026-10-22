@@ -59,6 +59,8 @@ Optional settings (add as plain **Text** variables; the defaults are shown):
 | `APP_URL` | the Worker's own address | Set this if you use a custom domain. |
 | `CORS_ORIGINS` | none | Websites allowed to call the API from a browser, comma-separated. |
 | `ALLOW_SIGNUPS` | `true` | `false` closes creator signup. |
+| `PLATFORM_NAME` | `Paywall Bot` | Name shown on the landing page and dashboard. |
+| `SUPPORT_CONTACT` | none | How creators reach you to upgrade, e.g. `@yourname on Telegram`. Shown on the landing page and in the dashboard. |
 
 ### 4. Run setup and check your credentials
 
@@ -105,7 +107,15 @@ The **image vault** is a set of photos sold separately: once `IMAGE_UNLOCK_PRICE
 
 ## Creator platform
 
-Other creators use the API with their own key. You, as the owner, can use the same API for your own bot by sending `x-admin-key` instead of `x-api-key`.
+Creators sign up and manage everything in the browser:
+
+- **`/`** is a landing page with pricing and a free-trial button (API clients asking for JSON still get the status response).
+- **`/dashboard`** is the creator dashboard: sign up, save the account key, add a bot with its Paystack / NOWPayments keys, check the connection, change prices and welcome text, pause sales, see members and payments, give or remove access, rotate the key and connect Claude.
+- Sign in to the dashboard with the **admin key** to see your own bot, platform totals and a **Creators** page where you change plans, set a custom fee, suspend creators and add Paystack split codes.
+
+The dashboard keeps the key in the browser tab only (sessionStorage) and runs under a strict content security policy with no inline script.
+
+Everything the dashboard does is also available through the API. Other creators use the API with their own key. You, as the owner, can use the same API for your own bot by sending `x-admin-key` instead of `x-api-key`.
 
 ### Plans
 
