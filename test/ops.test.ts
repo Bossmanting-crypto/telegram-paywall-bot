@@ -198,22 +198,78 @@ describe("recovering a lost key", () => {
   });
 });
 
+// ── Volume pricing ───────────────────────────────────────────────────────────
+
+/** Record past confirmed sales for a creator, as if they happened `daysAgo`. */
+async function pastSales(tenantId: string, botId: string, usd: number, daysAgo: number) {
+  const at = Math.floor(Date.now() / 1000) - daysAgo * 86400;
+  await env.DB.prepare(
+    `INSERT INTO payments (id, tenant_id, bot_id, telegram_id, provider, provider_ref, access_type,
+       gross_amount, platform_fee, net_amount, status, created_at, confirmed_at)
+     VALUES (?1, ?2, ?3, 1, 'paystack', ?1, 'monthly', ?4, 0, ?4, 'confirmed', ?5, ?5)`,
+  ).bind(`past-${daysAgo}-${usd}`, tenantId, botId, usd, at).run();
+}
+
+async function linkFee(headers: Record<string, string>, botId: string): Promise<number> {
+  const link = await call("POST", "/api/v1/payments/generate-link", {
+    headers,
+    json: { bot_id: botId, telegram_id: BUYER, access_type: "one_time", provider: "paystack" },
+  });
+  expect(link.status, link.text).toBe(200);
+  return (await paymentRow(link.body.order_id))?.platform_fee;
+}
+
+describe("volume pricing", () => {
+  it("lowers the standard rate as a creator's last 30 days of sales grow", async () => {
+    const t = await signup();
+    const bot = await createBot(t.headers, 21);
+    expect(await linkFee(t.headers, bot.id)).toBe(1.2); // $10 at 12%
+
+    let me = await call("GET", "/api/v1/tenants/me", { headers: t.headers });
+    expect(me.body.platform_cut).toBe("12%");
+    expect(me.body.volume_pricing).toEqual({ sales_last_30_days: "$0.00", next: { from_usd: 1000, platform_cut: "10%" } });
+
+    await pastSales(t.id, bot.id, 900, 40); // too old to count
+    await pastSales(t.id, bot.id, 1000, 3);
+    expect(await linkFee(t.headers, bot.id)).toBe(1); // 10%
+
+    await pastSales(t.id, bot.id, 4000, 10);
+    expect(await linkFee(t.headers, bot.id)).toBe(0.8); // 8%
+
+    await pastSales(t.id, bot.id, 15000, 20);
+    expect(await linkFee(t.headers, bot.id)).toBe(0.6); // 6%
+    me = await call("GET", "/api/v1/tenants/me", { headers: t.headers });
+    expect(me.body.volume_pricing).toEqual({ sales_last_30_days: "$20000.00", next: null });
+  });
+
+  it("keeps Starter and custom rates flat", async () => {
+    const t = await signup();
+    const bot = await createBot(t.headers, 22);
+    await pastSales(t.id, bot.id, 25000, 1);
+    await call("POST", `/admin/tenants/${t.id}/tier`, { headers: asAdmin, json: { tier: "starter" } });
+    expect(await linkFee(t.headers, bot.id)).toBe(0.5);
+    await call("POST", `/admin/tenants/${t.id}/tier`, { headers: asAdmin, json: { tier: "free", platform_cut: 0.2 } });
+    expect(await linkFee(t.headers, bot.id)).toBe(2);
+    expect((await call("GET", "/api/v1/tenants/me", { headers: t.headers })).body.volume_pricing).toBeNull();
+  });
+});
+
 // ── Fees ─────────────────────────────────────────────────────────────────────
 
 describe("collecting platform fees", () => {
   it("tracks what a creator owes and lets them pay it through the owner's Paystack", async () => {
     const t = await signup();
     const bot = await createBot(t.headers, 3);
-    await creatorSale(t.headers, bot.id, 3); // $10 at 15% → $1.50 fee
+    await creatorSale(t.headers, bot.id, 3); // $10 at 12% → $1.20 fee
     await creatorSale(t.headers, bot.id, 3, env, BUYER + 1);
 
     let billing = await call("GET", "/api/v1/tenants/billing", { headers: t.headers });
-    expect(billing.body).toMatchObject({ fees_owed_usd: 3, fees_paid_usd: 0, billing_hold: false, fee_limit_usd: null });
+    expect(billing.body).toMatchObject({ fees_owed_usd: 2.4, fees_paid_usd: 0, billing_hold: false, fee_limit_usd: null });
     expect(billing.body.payment_providers).toContain("paystack");
 
     const pay = await call("POST", "/api/v1/tenants/pay-fees", { headers: t.headers, json: { provider: "paystack" } });
     expect(pay.status, pay.text).toBe(200);
-    expect(pay.body.amount).toBe(3);
+    expect(pay.body.amount).toBe(2.4);
     expect(pay.body.order_id).toMatch(/^fee-/);
     const row = await paymentRow(pay.body.order_id);
     expect(row).toMatchObject({ bot_id: "owner", tenant_id: "owner", access_type: "platform_fee", for_tenant_id: t.id, platform_fee: 0 });
@@ -224,7 +280,7 @@ describe("collecting platform fees", () => {
 
     await ownerPaid(pay.body.order_id);
     billing = await call("GET", "/api/v1/tenants/billing", { headers: t.headers });
-    expect(billing.body).toMatchObject({ fees_owed_usd: 0, fees_paid_usd: 3 });
+    expect(billing.body).toMatchObject({ fees_owed_usd: 0, fees_paid_usd: 2.4 });
     // Nothing was sent to a Telegram user for a platform payment.
     expect(mock.tg("sendMessage").filter((c) => c.body?.chat_id === 0)).toHaveLength(0);
 
@@ -241,13 +297,13 @@ describe("collecting platform fees", () => {
   });
 
   it("pauses sales when unpaid fees reach FEE_LIMIT_USD, warns the creator, and resumes once paid", async () => {
-    const limited = envWith({ FEE_LIMIT_USD: "3" });
+    const limited = envWith({ FEE_LIMIT_USD: "2.4" });
     const t = await signup();
     const bot = await createBot(t.headers, 5, { admin_user_ids: [CREATOR_TG] });
 
-    await creatorSale(t.headers, bot.id, 5, limited); // owes 1.50: below 80%
+    await creatorSale(t.headers, bot.id, 5, limited); // owes 1.20: below 80%
     expect(mock.tg("sendMessage").filter((c) => c.body?.chat_id === CREATOR_TG)).toHaveLength(0);
-    await creatorSale(t.headers, bot.id, 5, limited, BUYER + 1); // owes 3.00: hold
+    await creatorSale(t.headers, bot.id, 5, limited, BUYER + 1); // owes 2.40: hold
     expect((await tenant(t.id)).billing_hold).toBe(1);
     const alert = mock.tg("sendMessage").filter((c) => c.body?.chat_id === CREATOR_TG).at(-1);
     expect(String(alert?.body?.text)).toContain("Sales are paused");
@@ -260,7 +316,7 @@ describe("collecting platform fees", () => {
       env: limited,
     });
     expect(blocked.status).toBe(409);
-    expect((await call("GET", "/admin/tenants", { headers: asAdmin })).body.tenants[0]).toMatchObject({ billing_hold: true, fees_owed_usd: 3 });
+    expect((await call("GET", "/admin/tenants", { headers: asAdmin })).body.tenants[0]).toMatchObject({ billing_hold: true, fees_owed_usd: 2.4 });
 
     const pay = await call("POST", "/api/v1/tenants/pay-fees", { headers: t.headers, json: { provider: "paystack" }, env: limited });
     await ownerPaid(pay.body.order_id, limited);
@@ -291,7 +347,7 @@ describe("collecting platform fees", () => {
     const pay = await call("POST", "/api/v1/tenants/pay-fees", { headers: t.headers, json: { provider: "paystack" } });
     const snapshot = (await paymentRow(pay.body.order_id)) as any;
     await Promise.all([confirmPayment(env, snapshot), confirmPayment(env, snapshot)]);
-    expect((await tenant(t.id)).fees_paid_usd).toBe(1.5);
+    expect((await tenant(t.id)).fees_paid_usd).toBe(1.2);
   });
 
   it("never asks the owner for fees", async () => {
@@ -322,7 +378,7 @@ describe("buying Starter", () => {
     await ownerPaid(buy.body.order_id, priced);
 
     const after = await tenant(t.id);
-    expect(after).toMatchObject({ tier: "starter", platform_cut: 0.08, trial_ends_at: null });
+    expect(after).toMatchObject({ tier: "starter", platform_cut: 0.05, trial_ends_at: null });
     const days = (after.plan_expires_at - Date.now() / 1000) / 86400;
     expect(days).toBeGreaterThan(29.9);
     expect(days).toBeLessThan(30.1);
@@ -337,12 +393,13 @@ describe("buying Starter", () => {
     const t = await signup();
     const bot = await createBot(t.headers, 8, { admin_user_ids: [CREATOR_TG] });
     const at = Date.UTC(2026, 0, 1, 12, 0);
-    await env.DB.prepare("UPDATE tenants SET tier = 'starter', platform_cut = 0.08, trial_ends_at = NULL, plan_expires_at = ?1 WHERE id = ?2")
+    await env.DB.prepare("UPDATE tenants SET tier = 'starter', platform_cut = 0.05, trial_ends_at = NULL, plan_expires_at = ?1 WHERE id = ?2")
       .bind(at / 1000 - 60, t.id)
       .run();
     await runCron(at);
-    expect(await tenant(t.id)).toMatchObject({ tier: "free", platform_cut: 0.15, plan_expires_at: null });
-    expect((await env.DB.prepare("SELECT status FROM bots WHERE id = ?1").bind(bot.id).first())?.status).toBe("expired");
+    expect(await tenant(t.id)).toMatchObject({ tier: "free", platform_cut: 0.12, plan_expires_at: null });
+    // The bot keeps selling; only the fee goes back to the standard rate.
+    expect((await env.DB.prepare("SELECT status FROM bots WHERE id = ?1").bind(bot.id).first())?.status).toBe("active");
     expect(mock.tg("sendMessage").some((c) => c.body?.chat_id === CREATOR_TG && String(c.body?.text).includes("Starter plan has ended"))).toBe(true);
   });
 

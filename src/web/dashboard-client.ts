@@ -53,7 +53,13 @@ export const DASHBOARD_JS = String.raw`(function () {
   }
 
   function money(n) { var v = Number(n || 0); return (v < 0 ? "-$" : "$") + Math.abs(v).toFixed(2); }
-  function priceText(n) { var v = Number(n || 0); return v > 0 ? money(v) : "off"; }
+  var SYMBOL = { USD: "$", KES: "KSh ", NGN: "₦", GHS: "GH₵", ZAR: "R " };
+  function priceText(n, currency) {
+    var v = Number(n || 0);
+    if (!(v > 0)) return "off";
+    var c = currency || "USD";
+    return (SYMBOL[c] || c + " ") + v.toLocaleString("en-US", { maximumFractionDigits: 2 });
+  }
   function day(iso) {
     if (!iso) return "—";
     var d = new Date(iso);
@@ -175,10 +181,10 @@ export const DASHBOARD_JS = String.raw`(function () {
   function botStatus(status) {
     if (status === "active") return pill("Selling", "ok");
     if (status === "paused") return pill("Paused", "warn");
-    if (status === "expired") return pill("Trial ended", "bad");
+    if (status === "expired") return pill("Stopped", "bad");
     return pill(status || "unknown");
   }
-  var ACCESS = { one_time: "Lifetime", monthly: "Monthly", manual_grant: "Free, from you", image_unlock: "Image vault", coin_pack: "Coins", platform_fee: "Platform fees", starter_plan: "Starter plan" };
+  var ACCESS = { one_time: "Lifetime", daily: "Daily", weekly: "Weekly", monthly: "Monthly", manual_grant: "Free, from you", image_unlock: "Image vault", coin_pack: "Coins", platform_fee: "Platform fees", starter_plan: "Starter plan" };
   var PROVIDER = { paystack: "Paystack", nowpayments: "NOWPayments", btcpay: "BTCPay" };
 
   function tile(label, value, note) {
@@ -283,8 +289,8 @@ export const DASHBOARD_JS = String.raw`(function () {
   function viewSignup() {
     var name = input("name", { required: true, maxlength: 128, autocomplete: "name", placeholder: "Your name or brand" });
     setMain(h("div", { class: "auth stack" }, authTabs("signup"), panel(null, null,
-      h("h1", null, "Start your free trial"),
-      h("p", { class: "muted" }, "You'll get an account key straight away. No card needed."),
+      h("h1", null, "Start now"),
+      h("p", { class: "muted" }, "You'll get an account key straight away. No card, no monthly fee."),
       form(function (v) {
         var body = { name: v.name, email: v.email };
         if (v.telegram_id) body.telegram_id = Number(v.telegram_id);
@@ -309,22 +315,13 @@ export const DASHBOARD_JS = String.raw`(function () {
       h("h1", null, "Save your account key"),
       h("p", null, "This key is how you sign in. It's shown only once, so copy it somewhere safe now, such as a password manager."),
       copyField(res.api_key, "secret-key"),
-      h("p", { class: "hint" }, "Your free trial runs until " + day(res.trial_ends) + ". Each sale has a " + res.platform_cut + " platform fee."),
+      h("p", { class: "hint" }, "No monthly fee. Each sale has a " + res.platform_cut + " platform fee."),
       h("label", { class: "check", for: "saved-key" }, ok, h("span", null, "I've saved my key")),
       h("div", { class: "row" }, go2))));
   }
 
   // ── Overview ──────────────────────────────────────────────────────────────
 
-  function trialBanner(me) {
-    if (me.tier !== "free" || !me.trial_ends) return null;
-    var left = daysUntil(me.trial_ends);
-    var contact = PLATFORM.contact ? " Contact " + PLATFORM.contact + " to upgrade." : "";
-    if (left <= 0) return h("div", { class: "banner bad" }, h("span", null, "Your free trial has ended, so your bots have stopped selling." + contact), h("a", { href: "#account", class: "btn small" }, "See plans"));
-    return h("div", { class: left <= 3 ? "banner warn" : "banner info" },
-      h("span", null, "Free trial: " + plural(left, "day") + " left (until " + day(me.trial_ends) + ")."),
-      h("a", { href: "#account", class: "btn small" }, "See plans"));
-  }
 
   function botList(bots) {
     if (!bots.length) return h("p", { class: "empty" }, "No bots yet.");
@@ -332,15 +329,20 @@ export const DASHBOARD_JS = String.raw`(function () {
       return h("a", { class: "bot-row", href: "#bot/" + encodeURIComponent(b.id) },
         h("div", null,
           h("div", { class: "bot-name" }, b.bot_username ? "@" + String(b.bot_username).replace(/^@/, "") : b.id === "owner" ? "Your bot" : "Unnamed bot"),
-          h("div", { class: "hint" }, (b.group_name || "No group linked yet") + " · lifetime " + priceText(b.prices.one_time) + " · monthly " + priceText(b.prices.monthly))),
+          h("div", { class: "hint" }, (b.group_name || "No group linked yet") + " · " + planSummary(b.prices))),
         h("div", { class: "row" }, h("span", { class: "hint" }, plural(b.member_count || 0, "member")), botStatus(b.status)));
     }));
   }
 
+  function planSummary(p) {
+    var parts = [["daily", "daily"], ["weekly", "weekly"], ["monthly", "monthly"], ["one_time", "lifetime"]]
+      .filter(function (x) { return Number(p[x[0]]) > 0; })
+      .map(function (x) { return x[1] + " " + priceText(p[x[0]], p.currency); });
+    return parts.length ? parts.join(" · ") : "no plans on sale";
+  }
+
   function canAddBot(me, bots) {
     if (state.admin) return { ok: false, why: "Your own bot is set up through Cloudflare secrets. Creators add theirs here." };
-    if (me.tier === "free" && me.trial_ends && daysUntil(me.trial_ends) <= 0) return { ok: false, why: "Upgrade to add bots." };
-    if (me.tier === "free" && bots.length >= 1) return { ok: false, why: "The free trial includes one bot." };
     return { ok: true };
   }
 
@@ -353,7 +355,6 @@ export const DASHBOARD_JS = String.raw`(function () {
       state.me = me;
       var allowed = canAddBot(me, bots);
       var out = [pageHead("Hi, " + me.name, state.admin ? "Your own bot and the creators on your platform." : planName(me.tier) + " plan · " + me.platform_cut + " fee per sale")];
-      var banner = trialBanner(me); if (banner) out.push(banner);
       if (bill && bill.billing_hold) {
         out.push(h("div", { class: "banner bad" }, h("span", null, "Sales are paused: " + money(bill.fees_owed_usd) + " in platform fees is unpaid."), h("a", { href: "#account", class: "btn small" }, "Pay now")));
       } else if (bill && bill.fee_limit_usd && bill.fees_owed_usd >= bill.fee_limit_usd * 0.8) {
@@ -366,7 +367,7 @@ export const DASHBOARD_JS = String.raw`(function () {
       if (plat) {
         out.push(panel("Your platform", h("a", { href: "#creators" }, "Manage creators"),
           h("div", { class: "tiles" },
-            tile("Creators", String(plat.creators.total), plat.creators.on_free_trial + " on free trial"),
+            tile("Creators", String(plat.creators.total), plat.creators.on_free_trial + " on Standard"),
             tile("Fees earned, 30 days", money(plat.last_30_days.platform_fees_usd), "on " + money(plat.last_30_days.processed_usd) + " of creator sales"),
             tile("Fees earned, all time", money(plat.all_time.platform_fees_usd), plural(plat.all_time.transactions, "sale") + " in total"))));
       }
@@ -382,7 +383,12 @@ export const DASHBOARD_JS = String.raw`(function () {
     }).catch(failed);
   }
 
-  function planName(tier) { return tier === "starter" ? "Starter" : tier === "whitelabel" ? "White label" : "Free trial"; }
+  function nextRate(me) {
+    var v = me.volume_pricing;
+    if (!v || !v.next) return "";
+    return " · " + v.next.platform_cut + " once you pass $" + Number(v.next.from_usd).toLocaleString("en-US") + " in 30 days";
+  }
+  function planName(tier) { return tier === "starter" ? "Starter" : tier === "whitelabel" ? "White label" : "Standard"; }
 
   // ── Bots ──────────────────────────────────────────────────────────────────
 
@@ -392,27 +398,55 @@ export const DASHBOARD_JS = String.raw`(function () {
       var bots = r[0].bots, me = r[1];
       var allowed = canAddBot(me, bots);
       setMain(pageHead("Bots", "Each bot looks after one Telegram group.", allowed.ok ? h("a", { class: "btn primary", href: "#newbot" }, "Add a bot") : null),
-        trialBanner(me), panel(null, null, botList(bots), !allowed.ok ? h("p", { class: "hint" }, allowed.why) : null));
+        panel(null, null, botList(bots), !allowed.ok ? h("p", { class: "hint" }, allowed.why) : null));
     }).catch(failed);
   }
 
-  function currencyFields(currency, fxRate) {
-    var cur = select("currency", [["USD", "US dollar (USD)"], ["KES", "Kenyan shilling (KES)"], ["NGN", "Nigerian naira (NGN)"], ["GHS", "Ghanaian cedi (GHS)"], ["ZAR", "South African rand (ZAR)"]], currency || "USD");
-    var fx = input("fx_rate", { type: "number", min: "0.000001", step: "any", value: fxRate && currency !== "USD" ? fxRate : "", placeholder: "e.g. 129" });
-    var fxField = field("Exchange rate", fx, "How many of your currency equal 1 US dollar. Paystack charges the price times this rate.");
-    var sync = function () { fxField.hidden = cur.value === "USD"; fx.required = cur.value !== "USD"; };
-    cur.addEventListener("change", sync); sync();
-    return h("div", { class: "grid-2" }, field("Paystack charges in", cur, "Crypto is always priced in US dollars."), fxField);
-  }
-  function priceFields(p) {
+  var CURRENCIES = [["USD", "US dollar (USD)"], ["KES", "Kenyan shilling (KES)"], ["NGN", "Nigerian naira (NGN)"], ["GHS", "Ghanaian cedi (GHS)"], ["ZAR", "South African rand (ZAR)"]];
+  var PRICE_FIELDS = [
+    ["daily_price", "daily", "Daily", 0, "24 hours."],
+    ["weekly_price", "weekly", "Weekly", 0, "7 days."],
+    ["monthly_price", "monthly", "Monthly", 5, "30 days."],
+    ["one_time_price", "one_time", "Lifetime", 10, "Pay once, stay forever."],
+    ["image_unlock_price", "image_vault", "Image vault", 20, "0 hides a plan."],
+  ];
+  var PRICE_NAMES = PRICE_FIELDS.map(function (x) { return x[0]; });
+
+  /** Paystack currency, exchange rate, the currency prices are written in, and the prices. */
+  function pricingFields(currency, fxRate, p) {
     p = p || {};
-    var f = function (name, label, value, hint) {
-      return field(label, input(name, { type: "number", min: "0", max: "100000", step: "0.01", value: value === undefined ? "" : value, required: true }), hint);
+    var cur = select("currency", CURRENCIES, currency || "USD");
+    var fx = input("fx_rate", { type: "number", min: "0.000001", step: "any", value: fxRate && currency !== "USD" ? fxRate : "", placeholder: "e.g. 129" });
+    var fxField = field("Exchange rate", fx, "How many of your currency equal 1 US dollar. Used for crypto and platform fees, and for Paystack when prices are in dollars.");
+    var pc = select("price_currency", [], "USD");
+    var pcField = field("Set prices in", pc, "Shillings let you charge round amounts like KSh 50 a day. Switching doesn't convert the prices, so check them.");
+    var labels = [];
+    var grid = h("div", { class: "grid-3" }, PRICE_FIELDS.map(function (x) {
+      var value = p[x[1]] !== undefined ? p[x[1]] : x[3];
+      var el = field(x[2], input(x[0], { type: "number", min: "0", max: "10000000", step: "0.01", value: value, required: true }), x[4]);
+      labels.push([el.querySelector("label"), x[2]]);
+      return el;
+    }));
+    var wanted = p.currency || "USD";
+    var sync = function () {
+      var local = cur.value;
+      fxField.hidden = local === "USD"; fx.required = local !== "USD";
+      var keep = pc.value || wanted;
+      pc.textContent = "";
+      pc.appendChild(h("option", { value: "USD" }, "US dollars ($)"));
+      if (local !== "USD") pc.appendChild(h("option", { value: local }, (CURRENCIES.filter(function (c) { return c[0] === local; })[0] || [local, local])[1]));
+      pc.value = keep === local ? local : "USD";
+      pcField.hidden = local === "USD";
+      var unit = (SYMBOL[pc.value] || pc.value + " ").trim();
+      labels.forEach(function (l) { l[0].textContent = l[1] + " (" + unit + ")"; });
     };
-    return h("div", { class: "grid-3" },
-      f("one_time_price", "Lifetime access ($)", p.one_time !== undefined ? p.one_time : 10, "Pay once, stay forever."),
-      f("monthly_price", "Monthly access ($)", p.monthly !== undefined ? p.monthly : 5, "Renews every 30 days."),
-      f("image_unlock_price", "Image vault ($)", p.image_vault !== undefined ? p.image_vault : 20, "Set any price to 0 to hide it."));
+    cur.addEventListener("change", sync); pc.addEventListener("change", function () { wanted = pc.value; sync(); }); sync();
+    return [h("div", { class: "grid-2" }, field("Paystack charges in", cur, "Crypto is always paid in US dollars."), fxField), pcField, grid];
+  }
+  function priceBody(v) {
+    var out = { price_currency: v.currency === "USD" ? "USD" : v.price_currency || "USD" };
+    PRICE_NAMES.forEach(function (k) { out[k] = num(v[k]); });
+    return out;
   }
   function keyFields(current) {
     current = current || {};
@@ -436,7 +470,8 @@ export const DASHBOARD_JS = String.raw`(function () {
     var token = input("bot_token", { type: "password", required: true, spellcheck: "false", placeholder: "123456789:AA…" });
     setMain(pageHead("Add a bot", "It takes about five minutes. You can change everything later."),
       panel(null, null, form(function (v) {
-        var body = { bot_token: v.bot_token, one_time_price: num(v.one_time_price), monthly_price: num(v.monthly_price), image_unlock_price: num(v.image_unlock_price), currency: v.currency };
+        var body = priceBody(v);
+        body.bot_token = v.bot_token; body.currency = v.currency;
         if (v.currency !== "USD") body.fx_rate = num(v.fx_rate);
         KEY_NAMES.forEach(function (k) { if (v[k]) body[k] = v[k]; });
         if (v.welcome_title) body.welcome_title = v.welcome_title;
@@ -448,7 +483,7 @@ export const DASHBOARD_JS = String.raw`(function () {
         h("fieldset", null, h("legend", null, "Telegram bot"),
           field("Bot token", token, "In Telegram, message @BotFather, send /newbot, follow the steps and paste the token here."),
           field("Your Telegram user ID (optional)", input("admin_user_ids", { inputmode: "numeric", placeholder: "e.g. 123456789" }), "Lets the bot recognise you as its admin. Get it from @userinfobot.")),
-        h("fieldset", null, h("legend", null, "Prices"), priceFields(), currencyFields("USD")),
+        h("fieldset", null, h("legend", null, "Prices"), pricingFields("USD")),
         keyFields(),
         h("fieldset", null, h("legend", null, "Welcome message (optional)"),
           field("Title", input("welcome_title", { maxlength: 256, placeholder: "VIP Access Required" })),
@@ -510,9 +545,10 @@ export const DASHBOARD_JS = String.raw`(function () {
       // Only changed fields are sent, so settings that live in Cloudflare
       // (for the owner bot) don't block saving the others.
       var adminIds = (b.admin_user_ids || []).join(", ");
-      var original = { one_time_price: b.prices.one_time, monthly_price: b.prices.monthly, image_unlock_price: b.prices.image_vault, currency: b.currency || "USD", fx_rate: b.fx_rate, welcome_title: b.welcome_title || null, welcome_text: b.welcome_text || null, group_description: b.group_description || null, admin_user_ids: adminIds };
+      var original = { daily_price: b.prices.daily, weekly_price: b.prices.weekly, one_time_price: b.prices.one_time, monthly_price: b.prices.monthly, image_unlock_price: b.prices.image_vault, price_currency: b.prices.currency || "USD", currency: b.currency || "USD", fx_rate: b.fx_rate, welcome_title: b.welcome_title || null, welcome_text: b.welcome_text || null, group_description: b.group_description || null, admin_user_ids: adminIds };
       var settings = form(function (v) {
-        var next = { one_time_price: num(v.one_time_price), monthly_price: num(v.monthly_price), image_unlock_price: num(v.image_unlock_price), currency: v.currency, welcome_title: v.welcome_title || null, welcome_text: v.welcome_text || null, group_description: v.group_description || null, admin_user_ids: v.admin_user_ids.replace(/\s+/g, "").replace(/,/g, ", ") };
+        var next = priceBody(v);
+        Object.assign(next, { currency: v.currency, welcome_title: v.welcome_title || null, welcome_text: v.welcome_text || null, group_description: v.group_description || null, admin_user_ids: v.admin_user_ids.replace(/\s+/g, "").replace(/,/g, ", ") });
         if (v.currency !== "USD") next.fx_rate = num(v.fx_rate);
         var body = {};
         Object.keys(next).forEach(function (k) { if (next[k] !== undefined && next[k] !== original[k]) body[k] = next[k]; });
@@ -520,7 +556,7 @@ export const DASHBOARD_JS = String.raw`(function () {
         return api("PATCH", path, body).then(function () { Object.keys(body).forEach(function (k) { original[k] = body[k]; }); toast("Saved."); });
       }, [
         isOwner ? h("p", { class: "hint" }, "Prices or currency you set in Cloudflare (ONE_TIME_PRICE_USD, MONTHLY_PRICE_USD, PAYSTACK_CURRENCY…) can only be changed there.") : null,
-        priceFields(b.prices), currencyFields(b.currency, b.fx_rate),
+        pricingFields(b.currency, b.fx_rate, b.prices),
         field("Welcome title", input("welcome_title", { maxlength: 256, value: b.welcome_title || "", placeholder: "VIP Access Required" })),
         field("Welcome message", textarea("welcome_text", b.welcome_text, { maxlength: 2000, placeholder: "Pay to unlock this exclusive group." })),
         field("Group description (optional)", textarea("group_description", b.group_description, { maxlength: 2000 }), "Shown under the welcome message."),
@@ -548,7 +584,7 @@ export const DASHBOARD_JS = String.raw`(function () {
           }, "danger");
           return h("tr", null, h("td", null, h("div", null, who), h("div", { class: "hint mono" }, String(m.telegram_id))),
             h("td", null, ACCESS[m.access_type] || m.access_type || "—"),
-            h("td", null, m.access_type === "monthly" ? "until " + day(m.access_expires) : m.access_expires ? "until " + day(m.access_expires) : "no end date"),
+            h("td", null, m.access_expires ? "until " + day(m.access_expires) : "no end date"),
             h("td", { class: "num" }, revoke));
         });
         memberBox.appendChild(h("div", { class: "table-wrap" }, h("table", null,
@@ -625,16 +661,25 @@ export const DASHBOARD_JS = String.raw`(function () {
         }
       };
       renderJoinLink(b.join_link, b.join_mode);
+      var passNow = String(b.free_pass_hours || 0);
+      var passOptions = [["0", "Off: pay to get in"], ["1", "1 hour"], ["6", "6 hours"], ["24", "1 day"], ["72", "3 days"], ["168", "7 days"]];
+      if (!passOptions.some(function (o) { return o[0] === passNow; })) passOptions.push([passNow, passNow + " hours"]);
       var joinForm = form(function (v) {
-        if (v.join_mode === b.join_mode) { toast("No changes to save."); return; }
-        return api("PATCH", path, { join_mode: v.join_mode }).then(function (res) {
+        var body = {};
+        if (v.join_mode !== b.join_mode) body.join_mode = v.join_mode;
+        if (Number(v.free_pass_hours) !== Number(b.free_pass_hours || 0)) body.free_pass_hours = Number(v.free_pass_hours);
+        if (!Object.keys(body).length) { toast("No changes to save."); return; }
+        return api("PATCH", path, body).then(function (res) {
+          if (body.free_pass_hours !== undefined) b.free_pass_hours = body.free_pass_hours;
+          if (body.join_mode === undefined) { toast(b.free_pass_hours ? "Newcomers now get a free pass." : "Free pass turned off."); return; }
           b.join_mode = v.join_mode; b.join_link = res.join_link || null;
           renderJoinLink(b.join_link, b.join_mode, res.notes);
           toast(v.join_mode === "approve" ? "Only paying people will be let in." : "Anyone can join; unpaid members are muted.");
         });
       }, [
+        field("Free pass for newcomers", select("free_pass_hours", passOptions, passNow), "New people get in free for this long, once each. Before it ends the bot offers your plans, and if they don't pay it takes their spot back."),
         field("Who can join", select("join_mode", [["mute", "Anyone can join, unpaid members are muted (read-only)"], ["approve", "People ask to join and are let in only after paying"]], b.join_mode || "mute")),
-        h("p", { class: "hint" }, "With approval on, the bot needs the Ban users and Invite users via link admin permissions. When a monthly plan runs out, the bot removes the member and they can ask to join again after renewing. Revoke your old invite links in Telegram so nobody can skip payment."),
+        h("p", { class: "hint" }, "With approval on, the bot needs the Ban users and Invite users via link admin permissions. When a plan or free pass runs out, the bot removes the member and they can ask to join again after renewing. Revoke your old invite links in Telegram so nobody can skip payment."),
       ], "Save");
 
       var parts = [
@@ -768,7 +813,7 @@ export const DASHBOARD_JS = String.raw`(function () {
       var mcp = location.origin + "/mcp";
       var parts = [pageHead("Account", me.email)];
       parts.push(h("div", { class: "tiles" },
-        tile("Plan", state.admin ? "Owner" : planName(me.tier), me.platform_cut + " fee per sale"),
+        tile("Plan", state.admin ? "Owner" : planName(me.tier), me.platform_cut + " fee per sale" + nextRate(me)),
         tile("Total sales", me.total_gross, "before fees"),
         tile("You earned", me.net_earned, me.platform_fees + " in fees")));
       if (!state.admin) {
@@ -810,7 +855,7 @@ export const DASHBOARD_JS = String.raw`(function () {
           if (v.custom_cut !== "") body.platform_cut = Number(v.custom_cut) / 100;
           return api("POST", "/admin/tenants/" + encodeURIComponent(t.id) + "/tier", body).then(function (r2) { toast(r2.message); viewCreators(); });
         }, [h("div", { class: "grid-2" },
-          field("Plan", select("tier", [["free", "Free trial (restarts 14 days)"], ["starter", "Starter"], ["whitelabel", "White label"]], t.tier)),
+          field("Plan", select("tier", [["free", "Standard (rate falls with volume)"], ["starter", "Starter"], ["whitelabel", "White label"]], t.tier)),
           field("Custom fee % (optional)", input("custom_cut", { type: "number", min: "0", max: "100", step: "0.5", placeholder: "Plan default" })))], "Change plan");
         var splitForm = form(function (v) {
           return api("POST", "/admin/tenants/" + encodeURIComponent(t.id) + "/paystack-subaccount", { code: v.code || null }).then(function (r2) { toast(r2.message); viewCreators(); });
@@ -834,7 +879,7 @@ export const DASHBOARD_JS = String.raw`(function () {
           h("div", { class: "row" }, resetKey, suspend, h("span", { class: "hint mono" }, "ID " + t.id)))));
         return [h("tr", null,
           h("td", null, h("div", null, h("b", null, t.name)), h("div", { class: "hint" }, t.email)),
-          h("td", null, planName(t.tier) + " · " + Math.round(t.platform_cut * 100) + "%", t.tier === "free" && t.trial_ends ? h("div", { class: "hint" }, "trial until " + day(t.trial_ends)) : null),
+          h("td", null, planName(t.tier) + " · " + Math.round(t.platform_cut * 100) + "%"),
           h("td", null, !t.active ? pill("Suspended", "bad") : t.billing_hold ? pill("Fees unpaid", "warn") : pill("Active", "ok")),
           h("td", { class: "num" }, String(t.bots)),
           h("td", { class: "num" }, money(t.processed_usd), h("div", { class: "hint" }, money(t.fees_owed_usd) + " owed")),

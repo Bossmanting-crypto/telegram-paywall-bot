@@ -60,7 +60,7 @@ describe("tenants", () => {
     expect(res.status).toBe(200);
     expect(res.body.api_key).toMatch(/^pbk_[0-9a-f]{64}$/);
     expect(res.body.tier).toBe("free");
-    expect(res.body.platform_cut).toBe("15%");
+    expect(res.body.platform_cut).toBe("12%");
 
     const row = await env.DB.prepare("SELECT * FROM tenants WHERE email = 'new@example.com'").first<Record<string, any>>();
     expect(row).not.toBeNull();
@@ -104,7 +104,7 @@ describe("tenants", () => {
     expect(res.status).toBe(402);
     const me = await call("GET", "/api/v1/tenants/me", { headers: t.headers });
     expect(me.body.tier).toBe("free");
-    expect(me.body.platform_cut).toBe("15%");
+    expect(me.body.platform_cut).toBe("12%");
   });
 
   it("lets the platform owner change a plan, and nobody else", async () => {
@@ -118,7 +118,7 @@ describe("tenants", () => {
     expect(ok.status).toBe(200);
     const me = await call("GET", "/api/v1/tenants/me", { headers: t.headers });
     expect(me.body.tier).toBe("starter");
-    expect(me.body.platform_cut).toBe("8%");
+    expect(me.body.platform_cut).toBe("5%");
     expect(me.body.trial_ends).toBeNull();
   });
 
@@ -156,16 +156,12 @@ describe("bots", () => {
     expect(detail.body.webhooks.paystack).toBe(`https://paywall.test/webhooks/paystack/${bot.id}`);
   });
 
-  it("limits the free tier to one bot", async () => {
+  it("lets creators on the standard plan run as many bots as they like", async () => {
     const t = await signup();
     await createBot(t.headers, 1);
-    const second = await call("POST", "/api/v1/bots", { headers: t.headers, json: { bot_token: botToken(2) } });
-    expect(second.status).toBe(403);
-    expect(second.body.detail).toContain("Free tier allows 1 bot");
-
-    await call("POST", `/admin/tenants/${t.id}/tier`, { headers: asAdmin, json: { tier: "starter" } });
-    const again = await call("POST", "/api/v1/bots", { headers: t.headers, json: { bot_token: botToken(2) } });
-    expect(again.status).toBe(200);
+    await createBot(t.headers, 2);
+    await createBot(t.headers, 3);
+    expect((await call("GET", "/api/v1/bots", { headers: t.headers })).body.count).toBe(3);
   });
 
   it("rejects bad tokens, tokens Telegram refuses, and bots already registered", async () => {
@@ -298,7 +294,7 @@ describe("owner account through the creator API", () => {
     const list = await call("GET", "/api/v1/bots", { headers: asAdmin });
     expect(list.status).toBe(200);
     expect(list.body.bots[0].id).toBe("owner");
-    expect(list.body.bots[0].prices).toEqual({ one_time: 10, monthly: 5, image_vault: 0 });
+    expect(list.body.bots[0].prices).toEqual({ currency: "USD", daily: 0, weekly: 0, monthly: 5, one_time: 10, image_vault: 0 });
     expect(list.body.bots[0].group_chat_id).toBe(-1001111111111);
 
     const overview = await call("GET", "/api/v1/analytics/overview", { headers: asAdmin });

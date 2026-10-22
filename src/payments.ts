@@ -3,8 +3,8 @@
  * create a payment link, confirm it exactly once, then unlock the member.
  */
 
+import { saleRate } from "./rates";
 import {
-  FREE_MEMBER_LIMIT,
   MAX_VAULT_IMAGES,
   PLAN_DAYS,
   TIER_CUT,
@@ -12,10 +12,7 @@ import {
 } from "./env";
 import {
   botIsSelling,
-  countActiveMembers,
   countVaultImages,
-  getMember,
-  hasValidAccess,
   memberGrantStatement,
   now,
   vaultUnlockStatement,
@@ -26,6 +23,7 @@ import {
   type Provider,
 } from "./db";
 import { alertCreator } from "./alerts";
+import { paystackMinor, toUsd } from "./pricing";
 import { balance, coinPurchaseStatements, sendContent, type ContentItem } from "./coins";
 import { newId, randomHex } from "./lib/crypto";
 import { HttpError, log, logError, round2 } from "./lib/http";
@@ -35,7 +33,9 @@ import * as paystack from "./providers/paystack";
 import { restrictMember, sendMessage, tg, TelegramError, unrestrictMember, type InlineKeyboard } from "./telegram";
 
 export const ACCESS_LABEL: Record<AccessType, string> = {
-  one_time: "One-Time Access",
+  one_time: "Lifetime Access",
+  daily: "Daily Access",
+  weekly: "Weekly Access",
   monthly: "Monthly Access",
   image_unlock: "Image Vault",
 };
@@ -93,21 +93,16 @@ export async function createPayment(
     throw new HttpError(400, "The image vault is empty, so there is nothing to sell yet.");
   }
 
-  // Free tier: capped number of paying members.
-  if (bot.tier === "free" && opts.accessType !== "image_unlock") {
-    const existing = await getMember(env, bot.id, opts.telegramId);
-    if (!hasValidAccess(existing) && (await countActiveMembers(env, bot.id)) >= FREE_MEMBER_LIMIT) {
-      throw new HttpError(
-        403,
-        `Free tier is limited to ${FREE_MEMBER_LIMIT} members. Upgrade to Starter for unlimited members.`,
-      );
-    }
-  }
+  // Remember how they paid, so the next prompt can offer it in one tap.
+  await env.DB.prepare("UPDATE members SET last_provider = ?1 WHERE bot_id = ?2 AND telegram_id = ?3")
+    .bind(opts.provider, bot.id, opts.telegramId)
+    .run();
 
   return startPayment(env, bot, {
     telegramId: opts.telegramId,
     kind: opts.accessType,
-    amount,
+    amount: toUsd(bot, amount),
+    chargeMinor: paystackMinor(bot, amount),
     coins: null,
     description: `${bot.welcomeTitle} — ${ACCESS_LABEL[opts.accessType]}`,
     provider: opts.provider,
@@ -134,7 +129,8 @@ export async function createCoinPayment(
   const created = await startPayment(env, bot, {
     telegramId: opts.telegramId,
     kind: "coin_pack",
-    amount: pack.price,
+    amount: toUsd(bot, pack.price),
+    chargeMinor: paystackMinor(bot, pack.price),
     coins: pack.coins,
     description: `${bot.welcomeTitle} — ${pack.coins} coins`,
     provider: opts.provider,
@@ -151,7 +147,10 @@ export async function startPayment(
   opts: {
     telegramId: number;
     kind: PaymentKind;
+    /** USD: what the ledger, platform fee and crypto providers use. */
     amount: number;
+    /** Exact Paystack charge in minor units, when the price is in the Paystack currency. */
+    chargeMinor?: number;
     coins: number | null;
     description: string;
     provider: Provider;
@@ -166,7 +165,12 @@ export async function startPayment(
   },
 ): Promise<CreatedPayment> {
   const amount = opts.amount;
-  const platformFee = round2(amount * bot.platformCut);
+  // Fees paid to the owner carry no cut; sales use the creator's current rate.
+  const cut =
+    opts.kind === "platform_fee" || opts.kind === "starter_plan"
+      ? 0
+      : (await saleRate(env, { id: bot.tenantId, tier: bot.tier, platformCut: bot.platformCut })).cut;
+  const platformFee = round2(amount * cut);
   const net = round2(amount - platformFee);
   // Paystack references may only contain letters, digits, "-", "." and "=".
   const orderId = `${opts.refPrefix ?? opts.telegramId}-${randomHex(6)}`;
@@ -174,10 +178,11 @@ export async function startPayment(
   const successUrl = `${opts.baseUrl}${opts.successPath ?? "/payment/success"}`;
   const cancelUrl = `${opts.baseUrl}/payment/cancel`;
 
-  const chargeMinor = opts.provider === "paystack" ? paystack.toMinorUnits(amount, bot.fxRate) : null;
+  const chargeMinor =
+    opts.provider === "paystack" ? (opts.chargeMinor ?? paystack.toMinorUnits(amount, bot.fxRate)) : null;
   const chargeCurrency = opts.provider === "paystack" ? bot.currency : null;
   // Paystack split: the platform fee goes straight to the owner's subaccount.
-  const feeMinor = chargeMinor !== null ? paystack.toMinorUnits(platformFee, bot.fxRate) : 0;
+  const feeMinor = chargeMinor !== null ? Math.round(chargeMinor * cut) : 0;
   const split =
     opts.provider === "paystack" && chargeMinor !== null && bot.paystack?.subaccount && feeMinor > 0
       ? { subaccount: bot.paystack.subaccount, mainAccountShareMinor: chargeMinor - feeMinor }
@@ -349,7 +354,7 @@ function platformPaymentStatements(env: AppEnv, payment: PaymentRow): D1Prepared
            ELSE ?4 + ?5 END,
          tier = 'starter'
        WHERE id = ?1 AND tier IN ('free', 'starter') AND ${pending}`,
-    ).bind(tenantId, payment.id, TIER_CUT.starter ?? 0.08, at, period),
+    ).bind(tenantId, payment.id, TIER_CUT.starter ?? 0.05, at, period),
     env.DB.prepare(
       `UPDATE bots SET status = 'active' WHERE tenant_id = ?1 AND status = 'expired' AND ${pending}`,
     ).bind(tenantId, payment.id),

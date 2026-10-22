@@ -53,7 +53,7 @@ const buttons = (callBody: Record<string, unknown> | null | undefined): Array<{ 
   ((callBody?.reply_markup as any)?.inline_keyboard ?? []).flat();
 
 /** Run the every-minute cron job at a given wall-clock time. */
-async function runCron(at = Date.UTC(2026, 0, 1, 12, 7)): Promise<void> {
+async function runCron(at = Date.UTC(2026, 0, 1, 12, 8)): Promise<void> {
   const ctx = createExecutionContext();
   await worker.scheduled(createScheduledController({ scheduledTime: at, cron: "* * * * *" }), env, ctx);
   await waitOnExecutionContext(ctx);
@@ -86,16 +86,16 @@ describe("buying access through the bot", () => {
     const sent = mock.tg("sendMessage").at(-1);
     expect(sent?.tgToken).toBe(OWNER_TOKEN);
     expect(sent?.body?.chat_id).toBe(BUYER);
-    expect(buttons(sent?.body).map((b) => b.callback_data)).toEqual(["access:one_time", "access:monthly"]);
-    expect(buttons(sent?.body)[0]?.text).toContain("$10");
-    expect(buttons(sent?.body)[1]?.text).toContain("$5/mo");
+    expect(buttons(sent?.body).map((b) => b.callback_data)).toEqual(["access:monthly", "access:one_time"]);
+    expect(buttons(sent?.body)[0]?.text).toContain("$5/mo");
+    expect(buttons(sent?.body)[1]?.text).toContain("$10");
     expect((await memberRow("owner", BUYER))?.first_name).toBe("Ada");
   });
 
   it("offers the configured payment methods, then produces a pay link", async () => {
     await telegramUpdate("owner", secret, press(BUYER, "access:monthly"));
     const menu = mock.tg("editMessageText").at(-1);
-    expect(String(menu?.body?.text)).toContain("$5.00");
+    expect(String(menu?.body?.text)).toContain("$5 / month");
     expect(buttons(menu?.body).map((b) => b.callback_data)).toEqual([
       "pay:monthly:paystack",
       "pay:monthly:nowpayments",
@@ -392,7 +392,7 @@ describe("scheduled jobs", () => {
     const restricted = mock.tg("restrictChatMember");
     expect(restricted).toHaveLength(1);
     expect(restricted[0]?.body).toMatchObject({ chat_id: OWNER_GROUP, user_id: BUYER });
-    expect(String(mock.tg("sendMessage").at(-1)?.body?.text)).toContain("subscription has expired");
+    expect(String(mock.tg("sendMessage").at(-1)?.body?.text)).toContain("Your access has ended");
 
     mock.calls.length = 0;
     await runCron();
@@ -413,24 +413,16 @@ describe("scheduled jobs", () => {
     expect(mock.tg("restrictChatMember")).toHaveLength(0); // restriction is not lifted
   });
 
-  it("stops a creator's bot when the free trial ends, and restarts it on upgrade", async () => {
+  it("keeps a creator's bot selling with no end date on the standard plan", async () => {
     const t = await signup();
     const bot = await createBot(t.headers, 1);
-    await env.DB.prepare("UPDATE tenants SET trial_ends_at = ?1 WHERE id = ?2").bind(Math.floor(Date.now() / 1000) - 10, t.id).run();
-
-    await runCron(Date.UTC(2026, 0, 1, 12, 7)); // trial check only runs every 15 minutes
+    expect((await call("GET", "/api/v1/tenants/me", { headers: t.headers })).body.trial_ends).toBeNull();
+    await runCron(Date.UTC(2027, 0, 1, 12, 15));
     expect((await call("GET", `/api/v1/bots/${bot.id}`, { headers: t.headers })).body.status).toBe("active");
-    await runCron(Date.UTC(2026, 0, 1, 12, 15));
-    expect((await call("GET", `/api/v1/bots/${bot.id}`, { headers: t.headers })).body.status).toBe("expired");
-
     const link = await call("POST", "/api/v1/payments/generate-link", {
       headers: t.headers,
       json: { bot_id: bot.id, telegram_id: BUYER, access_type: "one_time", provider: "paystack" },
     });
-    expect(link.status).toBe(409);
-    expect((await call("PATCH", `/api/v1/bots/${bot.id}`, { headers: t.headers, json: { status: "active" } })).status).toBe(403);
-
-    await call("POST", `/admin/tenants/${t.id}/tier`, { headers: asAdmin, json: { tier: "starter" } });
-    expect((await call("GET", `/api/v1/bots/${bot.id}`, { headers: t.headers })).body.status).toBe("active");
+    expect(link.status).toBe(200);
   });
 });

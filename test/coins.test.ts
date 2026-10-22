@@ -308,7 +308,7 @@ describe("buying coin packs", () => {
     await call("PATCH", `/api/v1/bots/${bot.id}`, { headers: t.headers, json: { coins_enabled: true } });
     await telegramUpdate(bot.id, bot.webhookSecret, press(BUYER, "cpay:0:nowpayments"));
     const orderId = await env.DB.prepare("SELECT provider_ref FROM payments WHERE bot_id = ?1").bind(bot.id).first<{ provider_ref: string }>();
-    expect(await paymentRow(orderId!.provider_ref)).toMatchObject({ coins: 50, gross_amount: 3, platform_fee: 0.45, net_amount: 2.55 });
+    expect(await paymentRow(orderId!.provider_ref)).toMatchObject({ coins: 50, gross_amount: 3, platform_fee: 0.36, net_amount: 2.64 });
   });
 });
 
@@ -379,7 +379,7 @@ describe("join approval", () => {
     const menu = mock.tg("sendMessage").at(-1);
     expect(menu?.body?.chat_id).toBe(BUYER);
     expect(String(menu?.body?.text)).toContain("asking to join");
-    expect(buttons(menu?.body).map((b) => b.callback_data)).toEqual(["access:one_time", "access:monthly"]);
+    expect(buttons(menu?.body).map((b) => b.callback_data)).toEqual(["access:monthly", "access:one_time"]);
     expect(mock.tg("approveChatJoinRequest")).toHaveLength(0);
 
     await telegramUpdate("owner", secret, press(BUYER, "pay:monthly:paystack"));

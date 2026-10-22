@@ -8,7 +8,7 @@
  * the footer and /llms.txt automatically.
  */
 
-import { FREE_BOT_LIMIT, FREE_MEMBER_LIMIT, FREE_TRIAL_DAYS, PLAN_DAYS } from "../env";
+import { PLAN_DAYS } from "../env";
 import { esc, planFacts, siteFooter, siteHead, siteHeader, usd, type SiteContext } from "./pages";
 
 export interface Guide {
@@ -26,14 +26,14 @@ export interface Guide {
   related: string[];
 }
 
-const start = (ctx: SiteContext, label = "Start free") =>
+const start = (ctx: SiteContext, label = "Start now") =>
   ctx.signupsOpen ? `<a class="btn primary" href="/dashboard#signup">${label}</a>` : "";
 
 function feeLine(ctx: SiteContext): string {
   const p = planFacts(ctx);
   return ctx.starterPrice !== null
-    ? `The ${FREE_TRIAL_DAYS}-day free trial takes ${p.free} of each sale. Starter takes ${p.starter} and costs ${usd(ctx.starterPrice)} per ${PLAN_DAYS} days.`
-    : `There's no monthly fee: the ${FREE_TRIAL_DAYS}-day free trial takes ${p.free} of each sale, and Starter takes ${p.starter}.`;
+    ? `It's free to start: the platform takes ${p.free} of each sale, less as your sales grow. Starter is a flat ${p.starter} for ${usd(ctx.starterPrice)} per ${PLAN_DAYS} days.`
+    : `There's no monthly fee: the platform takes ${p.free} of each sale, less as your sales grow.`;
 }
 
 export const GUIDES: Guide[] = [
@@ -67,7 +67,7 @@ export const GUIDES: Guide[] = [
   <li><b>Open:</b> anyone can join, but newcomers are muted. They can read and can't post until they pay.</li>
   <li><b>Join approval:</b> people ask to join, the bot sends them the payment menu, and it lets them in the moment they pay. Give the bot the <b>Invite users via link</b> permission too, and share the join link it creates. Use this when the content itself is what you sell.</li>
 </ul>
-<p>Either way, when a monthly plan ends the bot takes access away and sends a one-tap renew button.</p>
+<p>Either way, when a plan ends the bot takes access away and sends the plans again with one-tap pay.</p>
 <div class="example"><b>Example:</b> 60 members at $5 a month is <b>$300 a month</b> before fees, collected and renewed without a single reminder from you.</div>`,
   },
   {
@@ -162,11 +162,11 @@ export const GUIDES: Guide[] = [
   <li><b>One paper at a time:</b> post each past paper's worked answers as a coin item. Students unlock just the ones they need; members get them all.</li>
 </ul>
 <h2>Parents can pay the way they already do</h2>
-<p>M-Pesa, card or bank through Paystack. Payments go straight to your account and the student is let in automatically. When the month ends, the bot sends them a one-tap renew button.</p>
+<p>M-Pesa, card or bank through Paystack. Payments go straight to your account and the student is let in automatically. Daily, weekly or monthly, priced in shillings if you like. When their plan ends, the bot offers a one-tap renewal.</p>
 <div class="example"><b>Example:</b> 40 students at $4 a month is <b>$160 a month</b> before fees. Add a few dozen paper unlocks at 5 coins each and you've covered your printing.</div>
 <h2>Keep the group tidy</h2>
 <p>Turn on join approval so only paying students get in, and give the bot the <b>Ban users</b> and <b>Invite users via link</b> permissions. Students whose plan ends are removed for you, so the group stays fair to those who paid.</p>
-<p>${esc(feeLine(ctx))} The free trial covers ${FREE_BOT_LIMIT} group and up to ${FREE_MEMBER_LIMIT} paying students.</p>`,
+<p>${esc(feeLine(ctx))}</p>`,
   },
   {
     slug: "paid-telegram-group-for-coaches",
@@ -288,8 +288,8 @@ ${siteHeader(ctx)}
     </article>
     <aside class="aside">
       <h3>Your group, now a business</h3>
-      <p>Card, M-Pesa and crypto payments. Build yours in 7 minutes.</p>
-      ${start(ctx, `Start your ${FREE_TRIAL_DAYS}-day free trial`)}
+      <p>Card, M-Pesa and crypto payments, daily, weekly or monthly.</p>
+      ${start(ctx)}
       ${related.length ? `<div class="stack"><p class="eyebrow">Related</p>${related.map((r) => `<a href="/guides/${r.slug}">${esc(r.title)}</a>`).join("")}</div>` : ""}
     </aside>
   </div>

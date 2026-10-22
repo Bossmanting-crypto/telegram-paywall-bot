@@ -67,16 +67,43 @@ export type AppEnv = Env & Settings;
 /** The built-in bot and tenant that are configured through Worker secrets. */
 export const OWNER_ID = "owner";
 
-export const FREE_TRIAL_DAYS = 14;
-export const FREE_MEMBER_LIMIT = 10;
-export const FREE_BOT_LIMIT = 1;
-export const MONTHLY_ACCESS_DAYS = 30;
 /** Length of a self-serve Starter plan period. */
 export const PLAN_DAYS = 30;
 export const MAX_VAULT_IMAGES = 100;
 
+/**
+ * The platform's cut of each sale, by creator plan. "free" is the standard
+ * plan: no monthly fee, no limits, and its rate falls with volume (see
+ * VOLUME_LADDER). A custom rate the owner sets for a creator overrides it.
+ */
 export const TIER_CUT: Record<string, number> = {
-  free: 0.15,
-  starter: 0.08,
+  free: 0.12,
+  starter: 0.05,
   whitelabel: 0,
 };
+
+/**
+ * Standard-plan rate for group plans and pay-per-post (coins, Image Vault),
+ * by the creator's confirmed sales over the last 30 days in USD.
+ * Highest threshold first.
+ */
+export const VOLUME_LADDER: ReadonlyArray<{ fromUsd: number; cut: number }> = [
+  { fromUsd: 20000, cut: 0.06 },
+  { fromUsd: 5000, cut: 0.08 },
+  { fromUsd: 1000, cut: 0.1 },
+  { fromUsd: 0, cut: 0.12 },
+];
+export const VOLUME_WINDOW_DAYS = 30;
+
+/**
+ * Other offerings, relative to the rate above. Escrow trades and hiring are
+ * on the roadmap; their rates live here so the schedule is in one place.
+ */
+export const OFFERING_RATE = {
+  /** Group plans (daily, weekly, monthly, lifetime) and pay-per-post. */
+  sales: (cut: number) => cut,
+  /** Escrow trades between members: half the rate. */
+  trades: (cut: number) => cut / 2,
+  /** Hiring a worker or agent: three points more. */
+  work: (cut: number) => (cut > 0 ? cut + 0.03 : 0),
+} as const;

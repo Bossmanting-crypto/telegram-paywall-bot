@@ -223,6 +223,12 @@ footer { border-top: 1px solid var(--line); padding-block: 36px 48px; color: var
 .calc { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 22px; overflow: hidden; }
 @media (max-width: 780px) { .calc { grid-template-columns: 1fr; } }
 .calc-inputs { display: grid; gap: 28px; padding: clamp(22px, 4vw, 36px); }
+.calc-switches { display: flex; flex-wrap: wrap; gap: 10px; }
+.calc-switches[hidden] { display: none; }
+.seg { display: inline-flex; padding: 3px; border: 1px solid var(--line); border-radius: 99px; background: var(--bg); }
+.seg button { appearance: none; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: .9rem; padding: 6px 14px; border-radius: 99px; cursor: pointer; min-height: 32px; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .calc-field { display: grid; grid-template-columns: 1fr auto; gap: 12px 16px; align-items: baseline; }
 .calc-field > span { color: var(--muted); font-size: .95rem; }
 .calc-field output { font-family: var(--display); font-size: 1.6rem; font-weight: 500; font-variant-numeric: tabular-nums; }
