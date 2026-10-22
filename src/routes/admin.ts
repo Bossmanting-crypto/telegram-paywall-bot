@@ -7,8 +7,10 @@ import { OWNER_ID } from "../env";
 import { encryptionConfigured } from "../lib/crypto";
 import { HttpError, baseUrl, optNumber, optString, readJson, type AppContext } from "../lib/http";
 import { webhookUrl } from "../payments";
+import { recordFeesPaid } from "../billing";
 import {
   listCreators,
+  rotateTenantKey,
   platformOverview,
   setCreatorActive,
   setCreatorPaystackSubaccount,
@@ -183,6 +185,24 @@ admin.post("/tenants/:id/tier", async (c) => {
     platform_cut: result.platformCut,
     trial_ends: result.trialEndsAt,
   });
+});
+
+/** Give a creator a new API key, e.g. when they've lost theirs. Shown once. */
+admin.post("/tenants/:id/rotate-key", async (c) => {
+  const apiKey = await rotateTenantKey(c.env, c.req.param("id"));
+  return c.json({ message: "New key created. Pass it to the creator; it won't be shown again.", api_key: apiKey });
+});
+
+/** Record platform fees a creator paid outside the dashboard. A negative amount corrects a mistake. */
+admin.post("/tenants/:id/fees-paid", async (c) => {
+  const id = c.req.param("id");
+  const body = await readJson(c);
+  const amount = optNumber(body, "amount", { min: -100000, max: 100000 });
+  if (amount === undefined || amount === 0) throw new HttpError(422, "'amount' (USD) is required.");
+  const found = await c.env.DB.prepare("SELECT id FROM tenants WHERE id = ?1 AND id != ?2").bind(id, OWNER_ID).first();
+  if (!found) throw new HttpError(404, "Tenant not found.");
+  await recordFeesPaid(c.env, id, amount);
+  return c.json({ message: `Recorded $${amount.toFixed(2)} of fees paid.`, tenant_id: id });
 });
 
 /** Suspend or restore a creator. Suspended creators' bots stop selling. */

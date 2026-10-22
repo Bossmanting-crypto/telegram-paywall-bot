@@ -6,6 +6,9 @@
  * `pbk_…` API key, or the platform's ADMIN_API_KEY), approves, and the client
  * gets its own short-lived token. The key itself never reaches the client.
  *
+ * Someone without an account can create one on the same page (name and
+ * email); they're shown their new key once and then connected with it.
+ *
  * Grants are tied to the key they were approved with: rotating a creator key,
  * changing ADMIN_API_KEY or suspending a creator ends every MCP session
  * started with the old key.
@@ -22,7 +25,8 @@ import { createMcpHandler } from "@modelcontextprotocol/server";
 import { OWNER_ID, type AppEnv } from "../env";
 import type { TenantRow } from "../db";
 import { safeEqual, sha256Hex } from "../lib/crypto";
-import { logError } from "../lib/http";
+import { HttpError, logError } from "../lib/http";
+import { createTenant } from "../services";
 import { MIN_ADMIN_KEY_LENGTH } from "../routes/auth";
 import { ensureReady } from "../schema";
 import { buildServer } from "./tools";
@@ -155,7 +159,8 @@ ul{margin:0 0 16px;padding-left:20px}label{display:block;font-weight:600;margin:
 input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);font:inherit}
 .row{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}button{padding:10px 16px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--text);font:inherit;font-weight:600;cursor:pointer}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-strong{overflow-wrap:anywhere}`;
+strong{overflow-wrap:anywhere}
+details{margin-top:20px;border-top:1px solid var(--line);padding-top:14px}summary{cursor:pointer;font-weight:600}`;
 
 function page(title: string, body: string, status = 200, headers?: Headers): Response {
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${escape(title)}</title><style>${STYLE}</style></head><body><main>${body}</main></body></html>`;
@@ -173,6 +178,34 @@ function keyForm(handle: string, error?: string): string {
   <p class="muted">Creators: the <code>pbk_</code> API key from sign-up. Platform owner: your <code>ADMIN_API_KEY</code>. The key is only checked here; the app never receives it.</p>
   <div class="row"><button class="primary" name="decision" value="approve">Allow</button><button name="decision" value="deny" formnovalidate>Deny</button></div>
 </form>`;
+}
+
+function signupForm(handle: string, error?: string, values: { name?: string; email?: string } = {}): string {
+  return `<details${error ? " open" : ""}><summary>New here? Create a free account</summary>
+${error ? `<p class="bad" role="alert">${escape(error)}</p>` : ""}
+<form method="post">
+  <input type="hidden" name="handle" value="${escape(handle)}">
+  <label for="name">Name or brand</label>
+  <input id="name" name="name" required maxlength="128" autocomplete="name" value="${escape(values.name ?? "")}">
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" required maxlength="256" autocomplete="email" value="${escape(values.email ?? "")}">
+  <p class="muted">Starts a free trial. You'll see your new account key once, then connect with it.</p>
+  <div class="row"><button class="primary" name="decision" value="signup">Create account</button></div>
+</form></details>`;
+}
+
+function newKeyPage(handle: string, apiKey: string, clientName: string): Response {
+  return page(
+    "Save your account key",
+    `<h1>Account created</h1>
+<p>Your account key is below. It's shown only this once, so copy it somewhere safe now. You'll use it to sign in to the dashboard and the API.</p>
+<p><code style="font-size:1rem;overflow-wrap:anywhere">${escape(apiKey)}</code></p>
+<form method="post">
+  <input type="hidden" name="handle" value="${escape(handle)}">
+  <input type="hidden" name="key" value="${escape(apiKey)}">
+  <div class="row"><button class="primary" name="decision" value="approve">I've saved it. Connect ${escape(clientName)}</button></div>
+</form>`,
+  );
 }
 
 function consentPage(details: ConsentDescription, handle: string, headers: Headers): Response {
@@ -195,7 +228,8 @@ ${loopback}
   <li>grant or remove members' access, create payment links and message members</li>
 </ul>
 <p class="muted">It cannot see or change your payment-provider keys. You can end access at any time by rotating your key.</p>
-${keyForm(handle)}`,
+${keyForm(handle)}
+${signupForm(handle)}`,
     200,
     headers,
   );
@@ -218,6 +252,23 @@ async function handleAuthorize(request: Request, env: AuthorizeEnv): Promise<Res
     if (request.method !== "POST") return errorPage("Unsupported request.", 405);
     const form = await request.formData();
     const handle = String(form.get("handle") ?? "");
+
+    if (form.get("decision") === "signup") {
+      const name = String(form.get("name") ?? "");
+      const email = String(form.get("email") ?? "");
+      try {
+        const created = await createTenant(env, {
+          name,
+          email,
+          telegramId: null,
+          ip: request.headers.get("cf-connecting-ip") ?? "",
+        });
+        return newKeyPage(handle, created.apiKey, "the app");
+      } catch (error) {
+        if (!(error instanceof HttpError)) throw error;
+        return page("Create an account", `<h1>Create an account</h1>${signupForm(handle, error.message, { name, email })}`, error.status === 429 ? 429 : 400);
+      }
+    }
 
     if (form.get("decision") !== "approve") {
       const denied = await oauth.denyConsent(request, handle);

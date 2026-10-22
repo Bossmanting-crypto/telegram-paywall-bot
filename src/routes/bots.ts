@@ -206,6 +206,12 @@ bots.post("/", async (c) => {
   }
 
   const bot = await loadTenantBot(c.env, id, tenant.id);
+  // The first admin becomes the Telegram account that can recover the API key.
+  if (tenant.recovery_telegram_id === null && bot.adminIds[0]) {
+    await c.env.DB.prepare("UPDATE tenants SET recovery_telegram_id = ?1 WHERE id = ?2 AND recovery_telegram_id IS NULL")
+      .bind(bot.adminIds[0], tenant.id)
+      .run();
+  }
   const offered = availableProviders(bot);
   const notes: string[] = [];
   if (bot.nowpayments && !bot.nowpayments.ipnSecret) {

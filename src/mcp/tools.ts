@@ -12,6 +12,7 @@
 
 import { McpServer, preloadSchemas, type CallToolResult } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
+import { billingStatus } from "../billing";
 import { checkBot, summarise } from "../checks";
 import { loadTenantBot, type AccessType, type BotConfig, type Provider, type TenantRow } from "../db";
 import type { AppEnv } from "../env";
@@ -287,12 +288,13 @@ function registerCreatorTools(server: McpServer, ctx: PaywallContext): void {
     {
       title: "Get account",
       description:
-        "Show the signed-in account: plan, platform cut, number of bots, trial end date and lifetime earnings. Use paywall_get_revenue for recent revenue.",
+        "Show the signed-in account: plan, platform cut, number of bots, trial end date, lifetime earnings and platform fees owed. Use paywall_get_revenue for recent revenue.",
       inputSchema: FORMAT_ONLY,
       annotations: READ_ONLY,
     },
     safe("paywall_get_account", async ({ response_format }) => {
       const a = await accountSummary(env, ctx.tenant);
+      const bill = ctx.admin ? null : await billingStatus(env, ctx.tenant);
       const data = {
         id: a.id,
         name: a.name,
@@ -305,6 +307,9 @@ function registerCreatorTools(server: McpServer, ctx: PaywallContext): void {
         gross_usd: a.grossUsd,
         platform_fees_usd: a.feesUsd,
         net_usd: a.netUsd,
+        ...(bill
+          ? { fees_owed_usd: bill.feesOwedUsd, sales_paused_for_fees: bill.billingHold, plan_expires: bill.planExpiresAt }
+          : {}),
       };
       return reply(response_format, data, () =>
         [
@@ -313,6 +318,9 @@ function registerCreatorTools(server: McpServer, ctx: PaywallContext): void {
           `- Bots: ${a.bots}`,
           ...(a.trialEndsAt ? [`- Free trial ends: ${a.trialEndsAt.slice(0, 10)}`] : []),
           `- Earned so far: ${usd(a.grossUsd)} gross, ${usd(a.feesUsd)} platform fees, ${usd(a.netUsd)} net`,
+          ...(bill && bill.feesOwedUsd > 0
+            ? [`- Platform fees owed: ${usd(bill.feesOwedUsd)}${bill.billingHold ? " (sales are paused until paid: dashboard → Account → Pay fees)" : ""}`]
+            : []),
         ].join("\n"),
       );
     }),

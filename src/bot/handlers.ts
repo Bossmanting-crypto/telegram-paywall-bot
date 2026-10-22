@@ -46,9 +46,10 @@ import {
   unlockWithCoins,
   type ContentItem,
 } from "../coins";
+import { alertCreator } from "../alerts";
 import { ensureJoinLink } from "../group";
 import { newId } from "../lib/crypto";
-import { queueBroadcast } from "../services";
+import { queueBroadcast, rotateTenantKey } from "../services";
 import { HttpError, logError, money } from "../lib/http";
 import {
   ACCESS_LABEL,
@@ -273,6 +274,7 @@ async function onChatMember(env: AppEnv, bot: BotConfig, upd: TgChatMemberUpdate
   } catch (error) {
     // Usually: the bot is not an admin, or lacks the "Ban users" permission.
     logError("could not restrict new member", error, { bot_id: bot.id, telegram_id: user.id });
+    await alertCreator(env, bot, "restrict", "Someone joined the group but I couldn't mute them, so they can post without paying. Make sure I'm an admin with the Ban users permission.");
     return;
   }
 
@@ -518,6 +520,11 @@ async function onMessage(env: AppEnv, bot: BotConfig, msg: TgMessage): Promise<v
     return;
   }
 
+  if (command?.name === "accountkey" && msg.chat.type === "private") {
+    await recoverAccountKey(env, bot, from, reply);
+    return;
+  }
+
   if (isAdmin && command && (await adminCommand(env, bot, command, reply, from))) return;
 
   if (msg.chat.type !== "private") return; // ordinary group chatter is ignored
@@ -569,6 +576,56 @@ async function onMessage(env: AppEnv, bot: BotConfig, msg: TgMessage): Promise<v
   }
 
   await sendPlanMenu(env, bot, msg.chat.id, member);
+}
+
+const KEY_RECOVERY_COOLDOWN = 600;
+
+/**
+ * A creator who has lost their API key sends /accountkey to one of their own
+ * bots from the Telegram account linked to their platform account, and gets
+ * a new key in this chat. The old key stops working.
+ */
+async function recoverAccountKey(
+  env: AppEnv,
+  bot: BotConfig,
+  from: TgUser,
+  reply: (html: string, extra?: Record<string, unknown>) => Promise<unknown>,
+): Promise<void> {
+  if (bot.isOwner) {
+    await reply("This bot's account uses the platform admin key, which is set in Cloudflare.");
+    return;
+  }
+  const tenant = await env.DB.prepare("SELECT recovery_telegram_id, is_active FROM tenants WHERE id = ?1")
+    .bind(bot.tenantId)
+    .first<{ recovery_telegram_id: number | null; is_active: number }>();
+  if (!tenant || tenant.recovery_telegram_id !== from.id) {
+    // Same answer whether or not an account exists, so nothing is revealed.
+    await reply("This Telegram account isn't linked to this bot's platform account, so I can't issue a key here.");
+    return;
+  }
+  if (tenant.is_active !== 1) {
+    await reply("This account is suspended. Contact the platform owner.");
+    return;
+  }
+  const at = now();
+  const last = await env.DB.prepare("SELECT last_sent_at FROM alerts WHERE key = ?1")
+    .bind(`accountkey:${bot.tenantId}`)
+    .first<{ last_sent_at: number }>();
+  if (last && last.last_sent_at > at - KEY_RECOVERY_COOLDOWN) {
+    await reply("A new key was issued a few minutes ago. Please wait 10 minutes before asking again.");
+    return;
+  }
+  await env.DB.prepare(
+    `INSERT INTO alerts (key, last_sent_at, suppressed) VALUES (?1, ?2, 0)
+     ON CONFLICT(key) DO UPDATE SET last_sent_at = ?2`,
+  )
+    .bind(`accountkey:${bot.tenantId}`, at)
+    .run();
+  const key = await rotateTenantKey(env, bot.tenantId);
+  await reply(
+    `🔑 <b>Your new account key</b>\n\n<code>${key}</code>\n\nYour old key has stopped working. Save this one somewhere safe, then delete this message. Sign in at the dashboard with it.`,
+    { protect_content: true },
+  );
 }
 
 async function addToVault(
@@ -874,6 +931,7 @@ async function onCallback(env: AppEnv, bot: BotConfig, query: TgCallbackQuery, b
       );
     } catch (error) {
       logError("coin payment link error", error, { bot_id: bot.id, provider });
+      await alertCreator(env, bot, `paylink-${provider}`, `A buyer couldn't get a ${provider} payment link for coins: ${error instanceof Error ? error.message : String(error)}. Check your ${provider} keys in the dashboard.`);
       await show("❌ Failed to generate a payment link. Please try again.", {
         inline_keyboard: [[{ text: "🪙 Coin packs", callback_data: "coins" }]],
       });
@@ -953,6 +1011,7 @@ async function onCallback(env: AppEnv, bot: BotConfig, query: TgCallbackQuery, b
         return;
       }
       logError("payment link error", error, { bot_id: bot.id, provider });
+      await alertCreator(env, bot, `paylink-${provider}`, `A buyer couldn't get a ${provider} payment link: ${error instanceof Error ? error.message : String(error)}. Check your ${provider} keys in the dashboard, then run the connection check.`);
       await showPlans("❌ Failed to generate a payment link. Please try again.");
     }
     return;
