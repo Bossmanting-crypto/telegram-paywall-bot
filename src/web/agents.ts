@@ -6,12 +6,10 @@
  */
 
 import { FREE_BOT_LIMIT, FREE_MEMBER_LIMIT, FREE_TRIAL_DAYS, PLAN_DAYS, TIER_CUT } from "../env";
-import type { PlatformInfo } from "./pages";
+import { GUIDES } from "./guides";
+import type { SiteContext } from "./pages";
 
-export interface AgentInfo extends PlatformInfo {
-  baseUrl: string;
-  starterPrice: number | null;
-}
+export type AgentInfo = SiteContext;
 
 const pct = (n: number | undefined, d: number) => `${Math.round((n ?? d) * 100)}%`;
 
@@ -24,7 +22,11 @@ export function llmsTxt(info: AgentInfo): string {
 
 > Charge for access to a Telegram group. A creator connects a Telegram bot and their own Paystack (cards, bank, M-Pesa) or NOWPayments (crypto) account; the bot takes payments, lets paying members in, removes them when a monthly plan ends, and can sell individual content items for coins. Buyers pay the creator directly. Agents and bots may sign up and operate accounts through the API or MCP.
 
-## Quick start (no human needed)
+## Quick start for agents
+
+An agent can do almost all of this through the API or MCP. Two steps need a person, so ask your human for:
+- **a Telegram bot token**: only people can create bots (message @BotFather, send /newbot);
+- **payment keys**: a Paystack secret key (cards, bank, M-Pesa) and/or a NOWPayments API key + IPN secret (crypto). These accounts need the person's identity.
 
 1. Sign up: POST ${b}/api/v1/tenants/signup with JSON {"name": "...", "email": "..."}. The response contains api_key (shown once). Optionally add "telegram_id" so the account key can be recovered later by sending /accountkey to the creator's bot.
 2. Create a bot: POST ${b}/api/v1/bots with header x-api-key and JSON {"bot_token": "<from @BotFather>", "paystack_secret_key": "sk_...", "one_time_price": 10, "monthly_price": 5}. Use nowpayments_api_key + nowpayments_ipn_secret for crypto.
@@ -38,6 +40,10 @@ ${info.signupsOpen ? "Signups are open." : "Signups are currently closed."} Erro
 - Free trial: ${FREE_TRIAL_DAYS} days, ${FREE_BOT_LIMIT} bot, up to ${FREE_MEMBER_LIMIT} paying members, ${pct(TIER_CUT.free, 0.15)} platform fee per sale.
 - Starter: ${pct(TIER_CUT.starter, 0.08)} per sale, unlimited bots and members; ${starter}.
 - Platform fees accrue per sale and are paid with POST /api/v1/tenants/pay-fees (see GET /api/v1/tenants/billing).
+
+## Guides
+
+${GUIDES.map((g) => `- [${g.title}](${b}/guides/${g.slug}): ${g.description}`).join("\n")}
 
 ## Interfaces
 
