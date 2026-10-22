@@ -144,7 +144,7 @@ describe("signup for people and bots", () => {
     const priced = envWith({ STARTER_PRICE_USD: "12" });
     const page = await call("GET", "/", { headers: { accept: "text/html" }, env: priced });
     expect(page.text).toContain("$12 per 30 days");
-    expect(page.text).not.toContain("No monthly fee");
+    expect(page.text).not.toContain("You only pay when you get paid");
     expect((await call("GET", "/llms.txt", { env: priced })).text).toContain("$12.00 per 30 days");
   });
 });

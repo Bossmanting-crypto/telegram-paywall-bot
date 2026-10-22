@@ -44,7 +44,7 @@ export const GUIDES: Guide[] = [
     tag: "Guide",
     description:
       "Turn a Telegram group into paid membership: a bot takes card, M-Pesa or crypto payments, lets members in and removes them when their plan ends.",
-    lead: "Telegram doesn't have a members-only switch for groups, but a bot can be the doorman. Here's how to set one up in about ten minutes.",
+    lead: "Telegram doesn't have a members-only switch for groups, but a bot can be the doorman. Here's how to set one up in about seven minutes.",
     related: ["telegram-paid-group-mpesa", "sell-pay-per-post-content-on-telegram"],
     body: (ctx) => `
 <p>A paid group needs three things: a way to take money, a way to let payers in, and a way to take access away when a plan ends. A paywall bot does all three inside Telegram, so you never chase anyone for a payment.</p>
@@ -142,7 +142,7 @@ export const GUIDES: Guide[] = [
 <h2>Pricing that works for fans</h2>
 <p>A monthly plan for regulars, plus coins for fans who only want the occasional clip. New fans get free coins to try a few clips first.</p>
 <div class="example"><b>Example:</b> 200 members at $4 a month is <b>$800 a month</b> before fees.</div>
-<h2>Set up in ten minutes</h2>
+<h2>Set up in seven minutes</h2>
 <p>Create a bot with @BotFather, connect Paystack or NOWPayments, and add the bot to your group as an admin. Turn on join approval if you only want paying fans inside. ${esc(feeLine(ctx))}</p>
 <p>Share the join link in your stream description or chat, and you're done.</p>`,
   },
@@ -288,7 +288,7 @@ ${siteHeader(ctx)}
     </article>
     <aside class="aside">
       <h3>Your group, now a business</h3>
-      <p>Card, M-Pesa and crypto payments. Live in about ten minutes.</p>
+      <p>Card, M-Pesa and crypto payments. Build yours in 7 minutes.</p>
       ${start(ctx, `Start your ${FREE_TRIAL_DAYS}-day free trial`)}
       ${related.length ? `<div class="stack"><p class="eyebrow">Related</p>${related.map((r) => `<a href="/guides/${r.slug}">${esc(r.title)}</a>`).join("")}</div>` : ""}
     </aside>

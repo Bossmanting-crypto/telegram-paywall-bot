@@ -61,6 +61,7 @@ Optional settings (add as plain **Text** variables; the defaults are shown):
 | `ALLOW_SIGNUPS` | `true` | `false` closes creator signup. |
 | `PLATFORM_NAME` | `Paywall Bot` | Name shown on the landing page and dashboard. |
 | `SUPPORT_CONTACT` | none | How creators reach you to upgrade, e.g. `@yourname on Telegram`. Shown on the landing page and in the dashboard. |
+| `PREVIEW_BOT_USERNAME` | none | A public bot that shows what members see. Adds a "See what members see" button to the homepage. |
 | `STARTER_PRICE_USD` | none | Price of 30 days of Starter, bought by creators in the dashboard. Unset: creators contact you to upgrade. |
 | `FEE_LIMIT_USD` | none | Unpaid platform fees at which a creator's sales pause until they pay. Unset: sales never pause. |
 | `SIGNUP_LIMIT_PER_HOUR` | `20` | Most signups from one network address per hour. `0` turns the cap off. Bots are welcome either way. |
@@ -174,7 +175,7 @@ curl -X POST https://<worker>/admin/tenants/<tenant_id>/tier \
 
 **Alerts.** Problems that cost sales are sent to Telegram, at most once an hour per problem: a creator hears from their own bot when buyers can't get a payment link, when the bot can't mute or admit someone, when a payment notification has a bad signature, and about fees and plan expiry. You get server errors and cron failures.
 
-**Public site.** `/` is the homepage and `/guides` holds short guides, one per niche and per key search (M-Pesa, pay-per-post, streamers, tutors, coaches, alert groups, AI agents). Add a guide by appending to `GUIDES` in `src/web/guides.ts`; it appears in the guides index, footer, `/sitemap.xml` and `/llms.txt` automatically. Prices and limits on every page come from the code and your settings. Fonts (Newsreader and Hanken Grotesk, SIL Open Font License) are served from the Worker.
+**Public site.** `/` is a lean homepage (the pitch, three steps, an earnings calculator, the niches and three questions) and `/guides` holds short guides, one per niche and per key search (M-Pesa, pay-per-post, streamers, tutors, coaches, alert groups, AI agents). Add a guide by appending to `GUIDES` in `src/web/guides.ts`; it appears in the guides index, footer, `/sitemap.xml` and `/llms.txt` automatically. Prices and limits on every page come from the code and your settings. Fonts (Newsreader and Hanken Grotesk, SIL Open Font License) are served from the Worker.
 
 **For AI agents and other bots.** `/llms.txt` explains the platform and the signup steps in plain text, `/openapi.json` describes the API, and the MCP sign-in page can create an account. Bots are welcome to sign up and run creator accounts.
 

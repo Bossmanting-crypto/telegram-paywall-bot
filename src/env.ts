@@ -29,6 +29,8 @@ export interface Settings {
   ALERTS?: string;
   /** Unpaid platform fees (USD) at which a creator's sales pause until they pay. Unset = never. */
   FEE_LIMIT_USD?: string;
+  /** Username of a public bot showing what members see (e.g. "PaywallPreviewBot"). Adds a homepage button. */
+  PREVIEW_BOT_USERNAME?: string;
   /** Price (USD) of 30 days of the Starter plan, bought in the dashboard. Unset = upgrades by contacting you. */
   STARTER_PRICE_USD?: string;
 

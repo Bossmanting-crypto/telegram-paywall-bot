@@ -6,6 +6,7 @@ import { baseUrl, type AppContext } from "../lib/http";
 import { llmsTxt, openApi, type AgentInfo } from "../web/agents";
 import { DASHBOARD_JS } from "../web/dashboard-client";
 import { FONT_FILES } from "../web/fonts";
+import { HOME_JS } from "../web/home-client";
 import { GUIDES, findGuide, guidePage, guidesIndexPage, robotsTxt, sitemapXml } from "../web/guides";
 import { dashboardPage, landingPage, platformInfo, type SiteContext } from "../web/pages";
 import { APP_CSS } from "../web/styles";
@@ -35,7 +36,13 @@ export function wantsHtml(accept: string | undefined): boolean {
 export const web = new Hono<AppContext>();
 
 function siteContext(c: Parameters<typeof baseUrl>[0]): SiteContext {
-  return { ...platformInfo(c.env), baseUrl: baseUrl(c), starterPrice: starterPrice(c.env) };
+  const preview = c.env.PREVIEW_BOT_USERNAME?.trim().replace(/^@/, "") ?? "";
+  return {
+    ...platformInfo(c.env),
+    baseUrl: baseUrl(c),
+    starterPrice: starterPrice(c.env),
+    previewBot: /^[A-Za-z0-9_]{5,32}$/.test(preview) ? preview : null,
+  };
 }
 const agentInfo = (c: Parameters<typeof baseUrl>[0]): AgentInfo => siteContext(c);
 const guideLinks = GUIDES.map((g) => ({ slug: g.slug, short: g.short }));
@@ -96,6 +103,9 @@ web.get("/signup", (c) => c.redirect("/dashboard#signup", 302));
 
 web.get("/assets/app.css", (c) =>
   c.body(APP_CSS, 200, { ...ASSET_HEADERS, "content-type": "text/css; charset=utf-8" }),
+);
+web.get("/assets/home.js", (c) =>
+  c.body(HOME_JS, 200, { ...ASSET_HEADERS, "content-type": "text/javascript; charset=utf-8" }),
 );
 web.get("/assets/dashboard.js", (c) =>
   c.body(DASHBOARD_JS, 200, { ...ASSET_HEADERS, "content-type": "text/javascript; charset=utf-8" }),
