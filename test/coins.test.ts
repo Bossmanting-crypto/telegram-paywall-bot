@@ -186,7 +186,8 @@ describe("unlocking content with coins", () => {
     await telegramUpdate("owner", secret, press(BUYER, `u:${ids[0]}`));
     const photo = mock.tg("sendPhoto").at(-1);
     expect(photo?.body).toMatchObject({ chat_id: BUYER, photo: "file-photo-0", protect_content: true });
-    expect(String(photo?.body?.caption)).toContain("5 left");
+    expect(String(photo?.body?.caption)).toContain("· 🪙 5");
+    expect(String(photo?.body?.caption)).not.toContain("left");
     expect((await memberRow("owner", BUYER))?.coins).toBe(5);
 
     // Unlocking the same item again is free.
@@ -196,6 +197,8 @@ describe("unlocking content with coins", () => {
     const photosBefore = mock.tg("sendPhoto").length;
     await telegramUpdate("owner", secret, press(BUYER, "c:0"));
     expect(mock.tg("sendPhoto")).toHaveLength(photosBefore + 1);
+    // ...with the current balance underneath.
+    expect(String(mock.tg("sendPhoto").at(-1)?.body?.caption)).toContain("· 🪙 5");
 
     await telegramUpdate("owner", secret, press(BUYER, `u:${ids[1]}`));
     expect((await memberRow("owner", BUYER))?.coins).toBe(0);

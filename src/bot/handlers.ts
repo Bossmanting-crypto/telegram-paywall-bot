@@ -384,8 +384,14 @@ async function showContent(env: AppEnv, bot: BotConfig, chatId: number, user: Tg
   const nav = navRow(index, total);
   const keyboard = (rows: InlineButton[][]): InlineKeyboard => ({ inline_keyboard: rows.filter((r) => r.length) });
 
-  if (seesEverything(member) || (await hasUnlocked(env, bot.id, user.id, item.id))) {
+  if (seesEverything(member)) {
     await sendContent(bot, chatId, item, itemCaption(item, index, total), keyboard([nav]));
+    return;
+  }
+  if (await hasUnlocked(env, bot.id, user.id, item.id)) {
+    // Coin users see their balance with every item they open.
+    const footer = bot.coins.enabled ? `🪙 ${member.coins}` : undefined;
+    await sendContent(bot, chatId, item, itemCaption(item, index, total, footer), keyboard([nav]));
     return;
   }
   if (!bot.coins.enabled) {
@@ -434,7 +440,7 @@ async function unlockItem(env: AppEnv, bot: BotConfig, chatId: number, user: TgU
     await outOfCoins(env, bot, chatId, member, result.balance);
     return;
   }
-  const footer = result.status === "unlocked" ? `🪙 ${result.balance} left` : undefined;
+  const footer = `🪙 ${result.balance}`;
   await sendContent(bot, chatId, item, itemCaption(item, index, total, footer), {
     inline_keyboard: nav.length ? [nav] : [],
   });
