@@ -11,6 +11,24 @@ export const iso = (t: number | null | undefined): string | null =>
 export type Tier = "free" | "starter" | "whitelabel";
 export type BotStatus = "active" | "paused" | "expired" | "deleted";
 export type AccessType = "one_time" | "monthly" | "image_unlock";
+/** What a payment bought: an access plan, or a pack of coins. */
+export type PaymentKind = AccessType | "coin_pack";
+export type JoinMode = "mute" | "approve";
+export type ContentKind = "photo" | "video" | "animation" | "document";
+
+export interface CoinPack {
+  coins: number;
+  /** USD */
+  price: number;
+}
+
+/** Used when a creator turns coins on without choosing their own packs. */
+export const DEFAULT_COIN_PACKS: readonly CoinPack[] = [
+  { coins: 50, price: 3 },
+  { coins: 150, price: 7 },
+  { coins: 500, price: 20 },
+];
+export const MAX_COIN_PACKS = 3;
 export type Provider = "paystack" | "nowpayments" | "btcpay";
 
 export const ACCESS_TYPES: readonly AccessType[] = ["one_time", "monthly", "image_unlock"];
@@ -58,6 +76,12 @@ export interface BotRow {
   btcpay_api_key_enc: string | null;
   btcpay_webhook_secret_enc: string | null;
   last_notice_message_id: number | null;
+  join_mode: JoinMode;
+  join_link: string | null;
+  coins_enabled: number;
+  free_coins: number;
+  unlock_cost: number;
+  coin_packs: string | null;
   created_at: number;
 }
 
@@ -71,6 +95,8 @@ export interface MemberRow {
   access_type: string | null;
   access_expires: number | null;
   images_unlocked: number;
+  coins: number;
+  free_coins_granted: number;
   joined_at: number;
 }
 
@@ -82,7 +108,8 @@ export interface PaymentRow {
   provider: Provider;
   provider_ref: string;
   provider_invoice_id: string | null;
-  access_type: AccessType;
+  access_type: PaymentKind;
+  coins: number | null;
   gross_amount: number;
   platform_fee: number;
   net_amount: number;
@@ -125,7 +152,32 @@ export interface BotConfig {
   tenantActive: boolean;
   trialEndsAt: number | null;
   lastNoticeMessageId: number | null;
+  joinMode: JoinMode;
+  /** Join-request invite link the bot created for approve mode. */
+  joinLink: string | null;
+  coins: { enabled: boolean; free: number; unlockCost: number; packs: CoinPack[] };
   createdAt: number;
+}
+
+/** Parse stored coin packs, falling back to the defaults. Never throws. */
+export function parseCoinPacks(value: string | null | undefined): CoinPack[] {
+  if (!value) return DEFAULT_COIN_PACKS.map((p) => ({ ...p }));
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) throw new Error("not a list");
+    const packs = parsed
+      .filter(
+        (p): p is CoinPack =>
+          typeof p === "object" && p !== null &&
+          Number.isSafeInteger((p as CoinPack).coins) && (p as CoinPack).coins > 0 &&
+          typeof (p as CoinPack).price === "number" && (p as CoinPack).price > 0,
+      )
+      .slice(0, MAX_COIN_PACKS)
+      .map((p) => ({ coins: p.coins, price: p.price }));
+    return packs;
+  } catch {
+    return DEFAULT_COIN_PACKS.map((p) => ({ ...p }));
+  }
 }
 
 type BotJoinRow = BotRow & {
@@ -199,6 +251,14 @@ async function resolveBot(env: AppEnv, row: BotJoinRow): Promise<BotConfig> {
     tenantActive: row.t_is_active === 1,
     trialEndsAt: row.t_trial_ends_at,
     lastNoticeMessageId: row.last_notice_message_id,
+    joinMode: (row.join_mode === "approve" ? "approve" : "mute") as JoinMode,
+    joinLink: row.join_link ?? null,
+    coins: {
+      enabled: row.coins_enabled === 1,
+      free: Math.max(0, row.free_coins ?? 0),
+      unlockCost: Math.max(1, row.unlock_cost ?? 1),
+      packs: parseCoinPacks(row.coin_packs),
+    },
     createdAt: row.created_at,
   };
 

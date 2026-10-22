@@ -11,7 +11,7 @@
 import { OWNER_ID, type AppEnv } from "./env";
 import { randomHex } from "./lib/crypto";
 
-const MIGRATIONS: string[][] = [
+export const MIGRATIONS: string[][] = [
   // ── 1: initial schema ──────────────────────────────────────────────────────
   [
     `CREATE TABLE IF NOT EXISTS schema_meta (
@@ -135,6 +135,50 @@ const MIGRATIONS: string[][] = [
        created_at   INTEGER NOT NULL
      )`,
     `CREATE INDEX IF NOT EXISTS idx_broadcasts_status ON broadcasts(status, created_at)`,
+  ],
+
+  // ── 2: coins, pay-per-item content, join approval ──────────────────────────
+  [
+    // 'mute': people join, stay muted until they pay. 'approve': the bot only
+    // approves join requests from people who have paid.
+    `ALTER TABLE bots ADD COLUMN join_mode TEXT NOT NULL DEFAULT 'mute'`,
+    `ALTER TABLE bots ADD COLUMN join_link TEXT`,
+    `ALTER TABLE bots ADD COLUMN coins_enabled INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE bots ADD COLUMN free_coins INTEGER NOT NULL DEFAULT 15`,
+    `ALTER TABLE bots ADD COLUMN unlock_cost INTEGER NOT NULL DEFAULT 5`,
+    `ALTER TABLE bots ADD COLUMN coin_packs TEXT`, // JSON [{coins, price}]; NULL = defaults
+
+    `ALTER TABLE members ADD COLUMN coins INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE members ADD COLUMN free_coins_granted INTEGER NOT NULL DEFAULT 0`,
+
+    // Coins bought by a coin-pack payment (access_type = 'coin_pack').
+    `ALTER TABLE payments ADD COLUMN coins INTEGER`,
+
+    // Content items: the vault now holds videos, GIFs and files too.
+    `ALTER TABLE vault_images ADD COLUMN kind TEXT NOT NULL DEFAULT 'photo'`,
+    `ALTER TABLE vault_images ADD COLUMN caption TEXT`,
+
+    // Every change to a coin balance, for support questions and audits.
+    `CREATE TABLE IF NOT EXISTS coin_ledger (
+       id          TEXT PRIMARY KEY,
+       bot_id      TEXT NOT NULL REFERENCES bots(id),
+       telegram_id INTEGER NOT NULL,
+       delta       INTEGER NOT NULL,
+       reason      TEXT NOT NULL,
+       ref         TEXT,
+       created_at  INTEGER NOT NULL
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_coin_ledger_member ON coin_ledger(bot_id, telegram_id, created_at)`,
+
+    // Items each person has unlocked with coins.
+    `CREATE TABLE IF NOT EXISTS content_unlocks (
+       bot_id      TEXT NOT NULL REFERENCES bots(id),
+       telegram_id INTEGER NOT NULL,
+       item_id     TEXT NOT NULL,
+       ref         TEXT NOT NULL,
+       created_at  INTEGER NOT NULL,
+       PRIMARY KEY (bot_id, telegram_id, item_id)
+     )`,
   ],
 ];
 

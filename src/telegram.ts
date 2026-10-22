@@ -53,12 +53,29 @@ export interface TgPhotoSize {
   height: number;
 }
 
+export interface TgFile {
+  file_id: string;
+  file_unique_id: string;
+}
+
 export interface TgMessage {
   message_id: number;
   from?: TgUser;
   chat: TgChat;
   text?: string;
+  caption?: string;
   photo?: TgPhotoSize[];
+  video?: TgFile;
+  animation?: TgFile;
+  document?: TgFile;
+}
+
+export interface TgChatJoinRequest {
+  chat: TgChat;
+  from: TgUser;
+  /** Private chat the bot may use for 5 minutes to message the requester. */
+  user_chat_id: number;
+  date: number;
 }
 
 export interface TgChatMember {
@@ -66,6 +83,7 @@ export interface TgChatMember {
   user: TgUser;
   is_member?: boolean;
   can_restrict_members?: boolean;
+  can_invite_users?: boolean;
 }
 
 export interface TgChatMemberUpdated {
@@ -88,6 +106,7 @@ export interface TgUpdate {
   callback_query?: TgCallbackQuery;
   chat_member?: TgChatMemberUpdated;
   my_chat_member?: TgChatMemberUpdated;
+  chat_join_request?: TgChatJoinRequest;
 }
 
 export interface InlineButton {
@@ -97,7 +116,7 @@ export interface InlineButton {
 }
 export type InlineKeyboard = { inline_keyboard: InlineButton[][] };
 
-export const ALLOWED_UPDATES = ["message", "callback_query", "chat_member", "my_chat_member"];
+export const ALLOWED_UPDATES = ["message", "callback_query", "chat_member", "my_chat_member", "chat_join_request"];
 
 // ── Permissions ──────────────────────────────────────────────────────────────
 

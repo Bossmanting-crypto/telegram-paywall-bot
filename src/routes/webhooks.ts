@@ -33,7 +33,7 @@ const paidAtLeast = (paid: number, price: number): boolean => Number.isFinite(pa
 async function settle(c: Ctx, payment: PaymentRow, bot: NonNullable<Awaited<ReturnType<typeof loadBot>>>): Promise<void> {
   if (await confirmPayment(c.env, payment)) {
     // Telegram calls happen after the response so the provider isn't kept waiting.
-    c.executionCtx.waitUntil(deliverAccess(c.env, bot, payment.telegram_id, payment.access_type));
+    c.executionCtx.waitUntil(deliverAccess(c.env, bot, payment.telegram_id, payment.access_type, payment.coins));
   }
 }
 

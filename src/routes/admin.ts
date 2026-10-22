@@ -15,6 +15,7 @@ import {
   setCreatorPlan,
 } from "../services";
 import { ALLOWED_UPDATES, TelegramError, looksLikeBotToken, tg } from "../telegram";
+import { ensureJoinLink } from "../group";
 import { ADMIN_PAGE } from "./admin-page";
 import { requireAdmin } from "./auth";
 
@@ -90,7 +91,11 @@ admin.post("/setup", async (c) => {
     commands: [{ command: "start", description: "Get access to the group" }],
   }).catch(() => undefined);
 
-  const fresh = (await loadBot(c.env, OWNER_ID)) ?? bot;
+  let fresh = (await loadBot(c.env, OWNER_ID)) ?? bot;
+  if (fresh.joinMode === "approve" && fresh.groupChatId && !fresh.joinLink) {
+    await ensureJoinLink(c.env, fresh).catch(() => undefined);
+    fresh = (await loadBot(c.env, OWNER_ID)) ?? fresh;
+  }
   const checks = await checkBot(fresh, base);
   return c.json({
     ok: true,
@@ -99,6 +104,8 @@ admin.post("/setup", async (c) => {
     group_chat_id: fresh.groupChatId,
     admin_user_ids: fresh.adminIds,
     prices_usd: fresh.prices,
+    join_mode: fresh.joinMode,
+    ...(fresh.joinLink ? { join_link: fresh.joinLink } : {}),
     payment_webhooks: {
       paystack: webhookUrl(base, "paystack", OWNER_ID),
       btcpay: webhookUrl(base, "btcpay", OWNER_ID),

@@ -178,7 +178,7 @@ export const DASHBOARD_JS = String.raw`(function () {
     if (status === "expired") return pill("Trial ended", "bad");
     return pill(status || "unknown");
   }
-  var ACCESS = { one_time: "Lifetime", monthly: "Monthly", manual_grant: "Free, from you", image_unlock: "Image vault" };
+  var ACCESS = { one_time: "Lifetime", monthly: "Monthly", manual_grant: "Free, from you", image_unlock: "Image vault", coin_pack: "Coins" };
   var PROVIDER = { paystack: "Paystack", nowpayments: "NOWPayments", btcpay: "BTCPay" };
 
   function tile(label, value, note) {
@@ -501,9 +501,10 @@ export const DASHBOARD_JS = String.raw`(function () {
       // Settings
       // Only changed fields are sent, so settings that live in Cloudflare
       // (for the owner bot) don't block saving the others.
-      var original = { one_time_price: b.prices.one_time, monthly_price: b.prices.monthly, image_unlock_price: b.prices.image_vault, currency: b.currency || "USD", fx_rate: b.fx_rate, welcome_title: b.welcome_title || null, welcome_text: b.welcome_text || null, group_description: b.group_description || null };
+      var adminIds = (b.admin_user_ids || []).join(", ");
+      var original = { one_time_price: b.prices.one_time, monthly_price: b.prices.monthly, image_unlock_price: b.prices.image_vault, currency: b.currency || "USD", fx_rate: b.fx_rate, welcome_title: b.welcome_title || null, welcome_text: b.welcome_text || null, group_description: b.group_description || null, admin_user_ids: adminIds };
       var settings = form(function (v) {
-        var next = { one_time_price: num(v.one_time_price), monthly_price: num(v.monthly_price), image_unlock_price: num(v.image_unlock_price), currency: v.currency, welcome_title: v.welcome_title || null, welcome_text: v.welcome_text || null, group_description: v.group_description || null };
+        var next = { one_time_price: num(v.one_time_price), monthly_price: num(v.monthly_price), image_unlock_price: num(v.image_unlock_price), currency: v.currency, welcome_title: v.welcome_title || null, welcome_text: v.welcome_text || null, group_description: v.group_description || null, admin_user_ids: v.admin_user_ids.replace(/\s+/g, "").replace(/,/g, ", ") };
         if (v.currency !== "USD") next.fx_rate = num(v.fx_rate);
         var body = {};
         Object.keys(next).forEach(function (k) { if (next[k] !== undefined && next[k] !== original[k]) body[k] = next[k]; });
@@ -515,6 +516,7 @@ export const DASHBOARD_JS = String.raw`(function () {
         field("Welcome title", input("welcome_title", { maxlength: 256, value: b.welcome_title || "", placeholder: "VIP Access Required" })),
         field("Welcome message", textarea("welcome_text", b.welcome_text, { maxlength: 2000, placeholder: "Pay to unlock this exclusive group." })),
         field("Group description (optional)", textarea("group_description", b.group_description, { maxlength: 2000 }), "Shown under the welcome message."),
+        field("Bot admins (Telegram user IDs)", input("admin_user_ids", { value: adminIds, placeholder: "e.g. 123456789", inputmode: "numeric" }), "Admins can use /stats, /grant and /broadcast, and add content by sending it to the bot. Separate several IDs with commas. Get yours from @userinfobot."),
       ], "Save changes");
 
       // Payment keys
@@ -559,6 +561,74 @@ export const DASHBOARD_JS = String.raw`(function () {
         return api("POST", path + "/members/" + encodeURIComponent(v.telegram_id) + "/grant").then(function () { toast("Free access given."); route(); });
       }, [field("Give someone free access", input("telegram_id", { inputmode: "numeric", required: true, pattern: "[0-9]+", title: "A number", placeholder: "Their Telegram user ID" }), "They get lifetime access. They can find their ID with @userinfobot.")], "Give access", "");
 
+      // Coins and content
+      var packs = (b.coins && b.coins.packs) || [];
+      var packRow = function (i) {
+        var p = packs[i] || {};
+        return h("div", { class: "grid-2" },
+          field("Pack " + (i + 1) + " coins", input("pack_coins_" + i, { type: "number", min: "1", step: "1", value: p.coins || "", placeholder: i === 0 ? "e.g. 50" : "Leave blank for no pack" })),
+          field("Pack " + (i + 1) + " price ($)", input("pack_price_" + i, { type: "number", min: "0.5", step: "0.01", value: p.price || "", placeholder: i === 0 ? "e.g. 3" : "" })));
+      };
+      var preview = h("p", { class: "banner info" });
+      var coinsForm = form(function (v) {
+        var list = [];
+        for (var i = 0; i < 3; i++) {
+          var c = v["pack_coins_" + i], pr = v["pack_price_" + i];
+          if (c === "" && pr === "") continue;
+          if (c === "" || pr === "") throw new Error("Pack " + (i + 1) + " needs both a number of coins and a price.");
+          list.push({ coins: Number(c), price: Number(pr) });
+        }
+        var body = { coins_enabled: v.coins_enabled === "on", free_coins: Number(v.free_coins), unlock_cost: Number(v.unlock_cost), coin_packs: list };
+        if (body.coins_enabled && !list.length) throw new Error("Add at least one coin pack so people can buy more coins.");
+        return api("PATCH", path, body).then(function () { toast(body.coins_enabled ? "Coins are on." : "Coins are off."); });
+      }, [
+        field("Coins", select("coins_enabled", [["off", "Off"], ["on", "On: free allowance plus coin packs"]], b.coins && b.coins.enabled ? "on" : "off")),
+        h("div", { class: "grid-2" },
+          field("Free coins for each new person", input("free_coins", { type: "number", min: "0", max: "100000", step: "1", required: true, value: b.coins ? b.coins.free_coins : 15 }), "Given once per Telegram account."),
+          field("Coins to unlock one item", input("unlock_cost", { type: "number", min: "1", max: "100000", step: "1", required: true, value: b.coins ? b.coins.unlock_cost : 5 }))),
+        preview,
+        packRow(0), packRow(1), packRow(2),
+        h("p", { class: "hint" }, "Members on a monthly or lifetime plan unlock everything free, so the plans work as the “go unlimited” option. Coins never expire."),
+      ], "Save coin settings");
+      var updatePreview = function () {
+        var v = values(coinsForm);
+        var free = Number(v.free_coins) || 0, cost = Math.max(1, Number(v.unlock_cost) || 1);
+        var first = Number(v.pack_coins_0) || 0, firstPrice = Number(v.pack_price_0) || 0;
+        var text = "New people get " + plural(Math.floor(free / cost), "free unlock") + ".";
+        if (first && firstPrice) text += " The first pack buys " + plural(Math.floor(first / cost), "item") + " for " + money(firstPrice) + " (" + money(firstPrice / Math.max(1, Math.floor(first / cost))) + " each).";
+        preview.textContent = text;
+      };
+      coinsForm.addEventListener("input", updatePreview); updatePreview();
+      var contentNote = h("p", { class: "muted" }, b.content_items
+        ? plural(b.content_items, "item") + " in your content vault. "
+        : "Your content vault is empty. ",
+        "To add content, send photos, videos, GIFs or files to " + (b.bot_username || "your bot") + " in a private chat. A caption becomes the teaser people see before unlocking. Only bot admins can add content.");
+
+      // Joining the group
+      var joinLinkBox = h("div", { class: "stack" });
+      var renderJoinLink = function (link, mode, notes) {
+        joinLinkBox.textContent = "";
+        (notes || []).forEach(function (n) { joinLinkBox.appendChild(h("p", { class: "banner warn" }, n)); });
+        if (mode !== "approve") return;
+        if (link) {
+          add(joinLinkBox, [h("p", null, h("b", null, "Share this link "), "instead of your old invite link. People who use it ask to join, and the bot lets them in once they've paid."), copyField(link)]);
+        } else if (!(notes || []).length) {
+          add(joinLinkBox, h("p", { class: "banner warn" }, "No join link yet. Add the bot to your group as an admin with the Invite users via link permission, then save again, or send /joinlink to the bot."));
+        }
+      };
+      renderJoinLink(b.join_link, b.join_mode);
+      var joinForm = form(function (v) {
+        if (v.join_mode === b.join_mode) { toast("No changes to save."); return; }
+        return api("PATCH", path, { join_mode: v.join_mode }).then(function (res) {
+          b.join_mode = v.join_mode; b.join_link = res.join_link || null;
+          renderJoinLink(b.join_link, b.join_mode, res.notes);
+          toast(v.join_mode === "approve" ? "Only paying people will be let in." : "Anyone can join; unpaid members are muted.");
+        });
+      }, [
+        field("Who can join", select("join_mode", [["mute", "Anyone can join, unpaid members are muted (read-only)"], ["approve", "People ask to join and are let in only after paying"]], b.join_mode || "mute")),
+        h("p", { class: "hint" }, "With approval on, the bot needs the Ban users and Invite users via link admin permissions. When a monthly plan runs out, the bot removes the member and they can ask to join again after renewing. Revoke your old invite links in Telegram so nobody can skip payment."),
+      ], "Save");
+
       var parts = [
         pageHead(name, (b.group_name ? "Group: " + b.group_name : "No group linked yet. Add the bot to your group as an admin.") , h("div", { class: "row" }, botStatus(b.status), actions)),
         h("div", { class: "tiles" },
@@ -569,6 +639,8 @@ export const DASHBOARD_JS = String.raw`(function () {
         panel("Connection", checkBtn, verdict, checkList),
         panel("Payment webhooks", null, hooks),
         panel("Prices and messages", null, settings),
+        panel("Joining the group", null, joinForm, joinLinkBox),
+        panel("Coins and content", null, contentNote, coinsForm),
         panel("Payment keys", null, keys),
         panel("Members", null, search, memberBox, grant),
       ];
@@ -603,7 +675,7 @@ export const DASHBOARD_JS = String.raw`(function () {
             h("td", null, day(p.confirmed_at || p.created_at)),
             h("td", null, names[p.bot_id] || p.bot_id),
             h("td", { class: "mono" }, String(p.telegram_id)),
-            h("td", null, ACCESS[p.access_type] || p.access_type),
+            h("td", null, p.access_type === "coin_pack" && p.coins ? p.coins + " coins" : ACCESS[p.access_type] || p.access_type),
             h("td", null, PROVIDER[p.provider] || p.provider),
             h("td", { class: "num" }, money(p.gross)),
             h("td", { class: "num" }, money(p.platform_fee)),

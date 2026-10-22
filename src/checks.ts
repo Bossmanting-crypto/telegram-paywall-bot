@@ -44,10 +44,15 @@ async function checkTelegram(bot: BotConfig, baseUrl: string): Promise<Record<st
 
   const expected = telegramWebhookUrl(baseUrl, bot.id);
   try {
-    const info = await tg<{ url: string; pending_update_count: number; last_error_message?: string }>(
-      bot.token,
-      "getWebhookInfo",
-    );
+    const info = await tg<{
+      url: string;
+      pending_update_count: number;
+      last_error_message?: string;
+      allowed_updates?: string[];
+    }>(bot.token, "getWebhookInfo");
+    // Telegram omits allowed_updates when every type is allowed.
+    const missingJoinRequests =
+      Array.isArray(info.allowed_updates) && !info.allowed_updates.includes("chat_join_request");
     if (info.url !== expected) {
       out.telegram_webhook = {
         ok: false,
@@ -61,6 +66,12 @@ async function checkTelegram(bot: BotConfig, baseUrl: string): Promise<Record<st
         ok: false,
         detail: `Webhook registered, but Telegram's last delivery failed: ${info.last_error_message}`,
         pending_updates: info.pending_update_count,
+      };
+    } else if (missingJoinRequests && bot.joinMode === "approve") {
+      out.telegram_webhook = {
+        ok: false,
+        detail: "Telegram isn't sending join requests to the bot yet. Run setup again (or save the join setting again) to fix it.",
+        url: expected,
       };
     } else {
       out.telegram_webhook = { ok: true, detail: "Webhook registered and delivering.", url: expected };
@@ -92,8 +103,19 @@ async function checkTelegram(bot: BotConfig, baseUrl: string): Promise<Record<st
         ok: false,
         detail: `The bot is an admin of "${chat.title ?? bot.groupChatId}" but lacks the "Ban users" permission.`,
       };
+    } else if (bot.joinMode === "approve" && self.can_invite_users !== true) {
+      out.telegram_group = {
+        ok: false,
+        detail: `The bot is an admin of "${chat.title ?? bot.groupChatId}" but lacks the "Invite users via link" permission, which it needs to let paying members in.`,
+      };
     } else {
-      out.telegram_group = { ok: true, detail: `Admin of "${chat.title ?? bot.groupChatId}" with permission to restrict members.` };
+      out.telegram_group = {
+        ok: true,
+        detail:
+          bot.joinMode === "approve"
+            ? `Admin of "${chat.title ?? bot.groupChatId}" and able to approve join requests.${bot.joinLink ? "" : " Send /joinlink to the bot to get the link to share."}`
+            : `Admin of "${chat.title ?? bot.groupChatId}" with permission to restrict members.`,
+      };
     }
   } catch (error) {
     out.telegram_group = {
