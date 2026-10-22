@@ -26,9 +26,9 @@ describe("landing page", () => {
 
   it("shows the plan fees from the code, not hard-coded copy", async () => {
     const page = await call("GET", "/", { headers: HTML });
-    expect(page.text).toContain("15% <small>per sale");
-    expect(page.text).toContain("8% <small>per sale");
-    expect(page.text).toContain("14 days");
+    expect(page.text).toContain('data-free="0.15" data-starter="0.08"');
+    expect(page.text).toContain("on Starter (8% fee)");
+    expect(page.text).toContain("The free trial is 14 days, 1 bot and up to 10 paying members.");
   });
 
   it("uses the platform name and contact, escaped", async () => {
@@ -114,9 +114,11 @@ describe("esc", () => {
 });
 
 describe("public site", () => {
-  it("says there's no monthly fee only when Starter has no price", async () => {
+  it("says you only pay when you get paid only when Starter has no price", async () => {
     const page = await call("GET", "/", { headers: HTML });
-    expect(page.text).toContain("No monthly fee");
+    expect(page.text).toContain("You only pay when you get paid.");
+    expect(page.text).toContain("Build yours in 7 minutes");
+    expect(page.text).not.toMatch(/\bdemo\b/i);
     expect(page.text).toContain('<link rel="canonical" href="https://paywall.test/">');
     expect(page.headers.get("content-security-policy")).toContain("font-src 'self'");
   });
@@ -170,5 +172,26 @@ describe("public site", () => {
     expect(guide.text).toContain("ask your human for");
     expect(guide.text).toContain("@BotFather");
     for (const g of GUIDES) expect(guide.text).toContain(`/guides/${g.slug}`);
+  });
+
+  it("shows a worked earnings example without script, and serves the calculator", async () => {
+    const page = await call("GET", "/", { headers: HTML });
+    // 60 members × $5 = $300; Starter keeps 92% → $276; trial keeps 85% → $255.
+    expect(page.text).toContain('<span class="calc-keep" id="calc-keep">$276</span>');
+    expect(page.text).toContain("$255 during the free trial");
+    expect(page.text).toContain('<script src="/assets/home.js" defer></script>');
+    const js = await call("GET", "/assets/home.js");
+    expect(js.headers.get("content-type")).toContain("text/javascript");
+    expect(js.text).toContain("data-calc");
+    expect(js.text).not.toMatch(/innerHTML|eval\(/);
+  });
+
+  it("adds a 'See what members see' button only for a valid preview bot", async () => {
+    expect((await call("GET", "/", { headers: HTML })).text).not.toContain("See what members see");
+    const withBot = await call("GET", "/", { headers: HTML, env: envWith({ PREVIEW_BOT_USERNAME: "@StudioPreviewBot" }) });
+    expect(withBot.text).toContain('href="https://t.me/StudioPreviewBot"');
+    expect(withBot.text).toContain("See what members see");
+    const bad = await call("GET", "/", { headers: HTML, env: envWith({ PREVIEW_BOT_USERNAME: "x\"><script>" }) });
+    expect(bad.text).not.toContain("See what members see");
   });
 });
