@@ -17,7 +17,8 @@ import { alertCreator } from "./alerts";
 import { loadBot, type BotConfig, type Provider, type TenantRow } from "./db";
 import { OWNER_ID, PLAN_DAYS, TIER_CUT, type AppEnv } from "./env";
 import { HttpError, round2 } from "./lib/http";
-import { availableProviders, startPayment, type CreatedPayment } from "./payments";
+import { ADULT_BLOCKED, availableProviders, startPayment, type CreatedPayment } from "./payments";
+import { tenantHasAdult } from "./services";
 
 /** Sales whose fee counts towards what a creator owes. */
 const FEE_BEARING = "status = 'confirmed' AND fee_collected = 0 AND access_type NOT IN ('platform_fee', 'starter_plan')";
@@ -61,6 +62,17 @@ async function ownerBot(env: AppEnv): Promise<BotConfig | null> {
   return loadBot(env, OWNER_ID);
 }
 
+/**
+ * Ways a creator can pay the owner. A creator with an adults-only group pays
+ * with crypto, so adult revenue never reaches the owner's Paystack account.
+ */
+async function feeProviders(env: AppEnv, tenantId: string, owner: BotConfig | null): Promise<Provider[]> {
+  if (!owner) return [];
+  const all = availableProviders(owner);
+  if (!(await tenantHasAdult(env, tenantId))) return all;
+  return all.filter((p) => !ADULT_BLOCKED.has(p));
+}
+
 export async function billingStatus(env: AppEnv, tenant: TenantRow): Promise<BillingStatus> {
   const [fees, owner] = await Promise.all([feesOwed(env, tenant.id), ownerBot(env)]);
   const price = starterPrice(env);
@@ -77,7 +89,7 @@ export async function billingStatus(env: AppEnv, tenant: TenantRow): Promise<Bil
       price !== null &&
       tenant.id !== OWNER_ID &&
       (tenant.tier === "free" || (tenant.tier === "starter" && tenant.plan_expires_at !== null)),
-    providers: owner ? availableProviders(owner) : [],
+    providers: await feeProviders(env, tenant.id, owner),
   };
 }
 
@@ -91,8 +103,9 @@ export async function createPlatformPayment(
 ): Promise<CreatedPayment> {
   if (tenant.id === OWNER_ID) throw new HttpError(400, "The platform owner doesn't pay platform fees.");
   const owner = await ownerBot(env);
-  if (!owner || !availableProviders(owner).includes(provider)) {
-    throw new HttpError(400, `Paying by ${provider} isn't available. Choose one of: ${owner ? availableProviders(owner).join(", ") || "none" : "none"}.`);
+  const allowed = await feeProviders(env, tenant.id, owner);
+  if (!owner || !allowed.includes(provider)) {
+    throw new HttpError(400, `Paying by ${provider} isn't available. Choose one of: ${allowed.join(", ") || "none"}.`);
   }
 
   let amount: number;

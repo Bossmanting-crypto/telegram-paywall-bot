@@ -41,6 +41,7 @@ ${info.signupsOpen ? "Signups are open." : "Signups are currently closed."} Erro
 - Starter: flat ${pct(TIER_CUT.starter, 0.05)} per sale; ${starter}.
 - The same rate applies to group plans (daily, weekly, monthly, lifetime) and pay-per-post (coins, Image Vault).
 - Optional free pass: a bot can let newcomers in free for 1 to 720 hours (free_pass_hours), then offer the plans.
+- Adult content: label the bot with "adult": true. Paystack doesn't support adult content, so labelled groups take crypto (NOWPayments or BTCPay) only, and their creators pay platform fees in crypto. Legal content of consenting adults only; nothing involving minors, no violence.
 - Platform fees accrue per sale and are paid with POST /api/v1/tenants/pay-fees (see GET /api/v1/tenants/billing).
 
 ## Guides
@@ -90,6 +91,8 @@ export function openApi(info: AgentInfo): Record<string, unknown> {
       admin_user_ids: { type: "array", items: { type: "integer" } },
       status: { type: "string", enum: ["active", "paused"] },
       join_mode: { type: "string", enum: ["mute", "approve"] },
+      free_pass_hours: { type: "integer", minimum: 0, maximum: 720 },
+      adult: { type: "boolean", description: "Adults-only group: crypto payments only (Paystack doesn't support adult content)" },
       coins_enabled: { type: "boolean" },
       free_coins: { type: "integer", minimum: 0 },
       unlock_cost: { type: "integer", minimum: 1 },

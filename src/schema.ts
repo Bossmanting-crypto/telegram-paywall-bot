@@ -236,6 +236,15 @@ export const MIGRATIONS: string[][] = [
     `UPDATE tenants SET platform_cut = 0.12 WHERE tier = 'free' AND platform_cut = 0.15`,
     `UPDATE tenants SET platform_cut = 0.05 WHERE tier = 'starter' AND platform_cut = 0.08`,
   ],
+
+  // ── 5: adults-only label ──────────────────────────────────────────────────
+  [
+    // Labelled groups only take payment methods that allow adult content
+    // (crypto); Paystack doesn't support it.
+    `ALTER TABLE bots ADD COLUMN adult INTEGER NOT NULL DEFAULT 0`,
+    // Set by the platform owner: the creator can't remove the label.
+    `ALTER TABLE bots ADD COLUMN adult_locked INTEGER NOT NULL DEFAULT 0`,
+  ],
 ];
 
 // Per-isolate flag so the version check runs once per cold start, not per request.

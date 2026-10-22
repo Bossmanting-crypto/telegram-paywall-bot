@@ -330,7 +330,7 @@ export const DASHBOARD_JS = String.raw`(function () {
         h("div", null,
           h("div", { class: "bot-name" }, b.bot_username ? "@" + String(b.bot_username).replace(/^@/, "") : b.id === "owner" ? "Your bot" : "Unnamed bot"),
           h("div", { class: "hint" }, (b.group_name || "No group linked yet") + " · " + planSummary(b.prices))),
-        h("div", { class: "row" }, h("span", { class: "hint" }, plural(b.member_count || 0, "member")), botStatus(b.status)));
+        h("div", { class: "row" }, h("span", { class: "hint" }, plural(b.member_count || 0, "member")), b.adult ? pill("18+", "warn") : null, botStatus(b.status)));
     }));
   }
 
@@ -448,12 +448,12 @@ export const DASHBOARD_JS = String.raw`(function () {
     PRICE_NAMES.forEach(function (k) { out[k] = num(v[k]); });
     return out;
   }
-  function keyFields(current) {
+  function keyFields(current, adult) {
     current = current || {};
     var placeholder = function (masked, fallback) { return masked ? "Saved: " + masked + " (leave blank to keep)" : fallback; };
     return [
       h("fieldset", null, h("legend", null, "Paystack · cards, bank, M-Pesa"),
-        h("p", { class: "hint" }, "Paystack dashboard → Settings → API Keys & Webhooks."),
+        h("p", { class: adult ? "banner warn" : "hint" }, adult ? "Off for this group while it's labelled adult content. Your keys stay saved." : "Paystack dashboard → Settings → API Keys & Webhooks."),
         h("div", { class: "grid-2" },
           field("Secret key", input("paystack_secret_key", { type: "password", placeholder: placeholder(current.paystack_secret_key, "sk_live_…"), pattern: "sk_.*", title: "Starts with sk_" })),
           field("Public key", input("paystack_public_key", { placeholder: current.paystack_secret_key ? "Leave blank to keep" : "pk_live_…", pattern: "pk_.*", title: "Starts with pk_" })))),
@@ -570,7 +570,7 @@ export const DASHBOARD_JS = String.raw`(function () {
           KEY_NAMES.forEach(function (k) { if (v[k]) body[k] = v[k]; });
           if (!Object.keys(body).length) throw new Error("Type a new key to replace the saved one.");
           return api("PATCH", path, body).then(function () { toast("Keys saved."); f.reset(); route(); });
-        }, keyFields(b.credentials), "Save keys");
+        }, keyFields(b.credentials, b.adult), "Save keys");
 
       // Members
       var memberBox = h("div");
@@ -682,6 +682,29 @@ export const DASHBOARD_JS = String.raw`(function () {
         h("p", { class: "hint" }, "With approval on, the bot needs the Ban users and Invite users via link admin permissions. When a plan or free pass runs out, the bot removes the member and they can ask to join again after renewing. Revoke your old invite links in Telegram so nobody can skip payment."),
       ], "Save");
 
+      // Adults-only label: changes which payment methods buyers see, nothing else.
+      var labelState = h("p", { class: "hint" });
+      var renderLabel = function () {
+        labelState.textContent = b.adult
+          ? "Buyers see crypto only (NOWPayments or BTCPay). Paystack is off for this group because it doesn't support adult content." + (b.adult_locked ? " Set by the platform." : "")
+          : "Every payment method you've set up is offered. Choose adult content if it applies: Paystack doesn't support it, so the group will take crypto only.";
+      };
+      renderLabel();
+      var labelSelect = select("adult", [["no", "General content"], ["yes", "Adult content (18+)"]], b.adult ? "yes" : "no");
+      if (b.adult_locked) labelSelect.disabled = true;
+      var labelForm = form(function (v) {
+        var want = v.adult === "yes";
+        if (want === !!b.adult) { toast("No changes to save."); return; }
+        return api("PATCH", path, { adult: want }).then(function (res) {
+          b.adult = want; renderLabel();
+          toast((res.notes && res.notes[0]) || (want ? "Labelled adults-only." : "Label removed. Paystack is available again."));
+          route();
+        });
+      }, [
+        field("What's in this group", labelSelect, "Legal content of consenting adults only. Nothing involving minors, and no violence."),
+        labelState,
+      ], "Save");
+
       var parts = [
         pageHead(name, (b.group_name ? "Group: " + b.group_name : "No group linked yet. Add the bot to your group as an admin.") , h("div", { class: "row" }, botStatus(b.status), actions)),
         h("div", { class: "tiles" },
@@ -694,6 +717,7 @@ export const DASHBOARD_JS = String.raw`(function () {
         panel("Prices and messages", null, settings),
         panel("Joining the group", null, joinForm, joinLinkBox),
         panel("Coins and content", null, contentNote, coinsForm),
+        panel("Content label", null, labelForm),
         panel("Payment keys", null, keys),
         panel("Members", null, search, memberBox, grant),
       ];
@@ -863,6 +887,16 @@ export const DASHBOARD_JS = String.raw`(function () {
         var paidForm = form(function (v) {
           return api("POST", "/admin/tenants/" + encodeURIComponent(t.id) + "/fees-paid", { amount: Number(v.amount) }).then(function (r2) { toast(r2.message); viewCreators(); });
         }, [field("Record fees paid outside the dashboard ($)", input("amount", { type: "number", step: "0.01", required: true, placeholder: "e.g. 25" }), "For cash or bank transfers. A negative amount corrects a mistake.")], "Record payment", "");
+        var labelForms = (t.bot_list || []).map(function (bot) {
+          var current = bot.adult ? (bot.locked ? "locked" : "adult") : "general";
+          return form(function (v) {
+            if (v.label === current) { toast("No changes to save."); return; }
+            return api("POST", "/admin/bots/" + encodeURIComponent(bot.id) + "/adult", { adult: v.label !== "general", lock: v.label === "locked" })
+              .then(function (r2) { toast((r2.notes && r2.notes[0]) || "Label removed."); viewCreators(); });
+          }, [field((bot.username ? "@" + bot.username : "Bot") + (bot.group ? " · " + bot.group : ""),
+            select("label", [["general", "General content"], ["adult", "Adult content: crypto only"], ["locked", "Adult content, locked by you"]], current),
+            "Adult groups only take crypto. Locked means the creator can't remove the label.")], "Save label", "");
+        });
         var keyBox = h("div", { class: "stack" });
         var resetKey = confirmButton("Reset their key", "Confirm reset", function () {
           return api("POST", "/admin/tenants/" + encodeURIComponent(t.id) + "/rotate-key").then(function (r2) {
@@ -876,12 +910,13 @@ export const DASHBOARD_JS = String.raw`(function () {
         detail.appendChild(h("td", { colspan: "6" }, h("div", { class: "stack" },
           h("div", { class: "grid-2" }, planForm, splitForm),
           h("div", { class: "grid-2" }, paidForm, h("div", { class: "stack" }, h("p", { class: "muted" }, "Owed " + money(t.fees_owed_usd) + " · paid " + money(t.fees_paid_usd) + (t.plan_expires ? " · plan until " + day(t.plan_expires) : "")), keyBox)),
+          labelForms.length ? h("div", { class: "grid-2" }, labelForms) : null,
           h("div", { class: "row" }, resetKey, suspend, h("span", { class: "hint mono" }, "ID " + t.id)))));
         return [h("tr", null,
           h("td", null, h("div", null, h("b", null, t.name)), h("div", { class: "hint" }, t.email)),
           h("td", null, planName(t.tier) + " · " + Math.round(t.platform_cut * 100) + "%"),
           h("td", null, !t.active ? pill("Suspended", "bad") : t.billing_hold ? pill("Fees unpaid", "warn") : pill("Active", "ok")),
-          h("td", { class: "num" }, String(t.bots)),
+          h("td", { class: "num" }, String(t.bots), (t.bot_list || []).some(function (b) { return b.adult; }) ? h("div", null, pill("18+", "warn")) : null),
           h("td", { class: "num" }, money(t.processed_usd), h("div", { class: "hint" }, money(t.fees_owed_usd) + " owed")),
           h("td", { class: "num" }, manageBtn)), detail];
       });
