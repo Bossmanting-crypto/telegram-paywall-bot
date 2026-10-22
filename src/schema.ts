@@ -207,6 +207,35 @@ export const MIGRATIONS: string[][] = [
        suppressed   INTEGER NOT NULL DEFAULT 0
      )`,
   ],
+
+  // ── 4: daily/weekly plans, local-currency prices, free pass; no trial limits ─
+  [
+    `ALTER TABLE bots ADD COLUMN daily_price REAL`,
+    `ALTER TABLE bots ADD COLUMN weekly_price REAL`,
+    // Currency the prices are written in: 'USD', or the Paystack currency (e.g. 'KES').
+    `ALTER TABLE bots ADD COLUMN price_currency TEXT NOT NULL DEFAULT 'USD'`,
+    // Free group pass for newcomers, in hours (0 = off).
+    `ALTER TABLE bots ADD COLUMN free_pass_hours INTEGER NOT NULL DEFAULT 0`,
+
+    `ALTER TABLE members ADD COLUMN pass_expires INTEGER`,
+    `ALTER TABLE members ADD COLUMN pass_used INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE members ADD COLUMN pass_warned INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE members ADD COLUMN pass_ended_at INTEGER`,
+    `ALTER TABLE members ADD COLUMN followup_sent INTEGER NOT NULL DEFAULT 0`,
+    // How the member paid last time, for a one-tap "pay again" button.
+    `ALTER TABLE members ADD COLUMN last_provider TEXT`,
+    `CREATE INDEX IF NOT EXISTS idx_members_pass ON members(pass_expires) WHERE pass_expires IS NOT NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_members_pass_ended ON members(pass_ended_at) WHERE pass_ended_at IS NOT NULL AND followup_sent = 0`,
+
+    // The free plan no longer ends and has no caps: clear trial dates and
+    // restart bots that were stopped by an ended trial.
+    `UPDATE tenants SET trial_ends_at = NULL WHERE tier = 'free'`,
+    `UPDATE bots SET status = 'active' WHERE status = 'expired'`,
+    // New rates: standard 15% → 12% (falling with volume), Starter 8% → 5%.
+    // Custom rates are kept.
+    `UPDATE tenants SET platform_cut = 0.12 WHERE tier = 'free' AND platform_cut = 0.15`,
+    `UPDATE tenants SET platform_cut = 0.05 WHERE tier = 'starter' AND platform_cut = 0.08`,
+  ],
 ];
 
 // Per-isolate flag so the version check runs once per cold start, not per request.

@@ -3,7 +3,7 @@
 import { Hono } from "hono";
 import { checkBot, summarise, telegramWebhookUrl } from "../checks";
 import { loadTenantBot, now, parseIdList } from "../db";
-import { FREE_BOT_LIMIT, OWNER_ID, type AppEnv } from "../env";
+import { OWNER_ID, type AppEnv } from "../env";
 import { encryptSecret, encryptionConfigured, newId, randomHex } from "../lib/crypto";
 import {
   HttpError,
@@ -19,6 +19,7 @@ import { isAcceptableServerUrl } from "../providers/btcpay";
 import {
   applyJoinMode,
   botDetail,
+  botPrices,
   coinAndJoinSettings,
   grantAccess,
   listBots,
@@ -103,20 +104,6 @@ bots.post("/", async (c) => {
   }
   const body = await readJson(c);
 
-  if (tenant.tier === "free") {
-    if (tenant.trial_ends_at !== null && tenant.trial_ends_at <= now()) {
-      throw new HttpError(403, "Your free trial has ended. Upgrade to Starter to keep using the platform.");
-    }
-    const existing = await c.env.DB.prepare(
-      "SELECT COUNT(*) AS n FROM bots WHERE tenant_id = ?1 AND status != 'deleted'",
-    )
-      .bind(tenant.id)
-      .first<{ n: number }>();
-    if ((existing?.n ?? 0) >= FREE_BOT_LIMIT) {
-      throw new HttpError(403, "Free tier allows 1 bot. Upgrade to Starter for unlimited bots.");
-    }
-  }
-
   const token = reqString(body, "bot_token", 256);
   if (!looksLikeBotToken(token)) {
     throw new HttpError(400, "Invalid bot token format. Get it from @BotFather.");
@@ -127,12 +114,18 @@ bots.post("/", async (c) => {
 
   const oneTime = optNumber(body, "one_time_price", PRICE) ?? 10;
   const monthly = optNumber(body, "monthly_price", PRICE) ?? 5;
+  const daily = optNumber(body, "daily_price", PRICE) ?? 0;
+  const weekly = optNumber(body, "weekly_price", PRICE) ?? 0;
   const imageUnlock = optNumber(body, "image_unlock_price", PRICE) ?? 20;
-  if (oneTime <= 0 && monthly <= 0) {
-    throw new HttpError(422, "Set a price above 0 for one_time_price or monthly_price.");
+  if (oneTime <= 0 && monthly <= 0 && daily <= 0 && weekly <= 0) {
+    throw new HttpError(422, "Set a price above 0 for at least one plan: daily_price, weekly_price, monthly_price or one_time_price.");
   }
   const currency = (optString(body, "currency", 8) ?? "USD").toUpperCase();
   if (!CURRENCY.test(currency)) throw new HttpError(422, "'currency' must be a 3-letter code such as USD or KES.");
+  const priceCurrency = (optString(body, "price_currency", 8) ?? "USD").toUpperCase();
+  if (priceCurrency !== "USD" && priceCurrency !== currency) {
+    throw new HttpError(422, `'price_currency' must be USD or the currency Paystack charges in (${currency}).`);
+  }
   const fxRate = optNumber(body, "fx_rate", { min: 0.000001 }) ?? 1;
   if (currency !== "USD" && body.fx_rate === undefined) {
     throw new HttpError(
@@ -168,6 +161,9 @@ bots.post("/", async (c) => {
     status: "active",
     one_time_price: oneTime,
     monthly_price: monthly,
+    daily_price: daily,
+    weekly_price: weekly,
+    price_currency: priceCurrency,
     image_unlock_price: imageUnlock,
     currency,
     fx_rate: fxRate,
@@ -227,11 +223,7 @@ bots.post("/", async (c) => {
     bot_id: id,
     bot_username: me.username ? `@${me.username}` : null,
     status: bot.status,
-    prices: {
-      one_time: `$${bot.prices.one_time}`,
-      monthly: `$${bot.prices.monthly}/mo`,
-      image_vault: `$${bot.prices.image_unlock}`,
-    },
+    prices: botPrices(bot),
     payment_providers: offered,
     webhooks: paymentWebhooks(base, id),
     next_steps: [
@@ -287,6 +279,7 @@ bots.get("/:botId", async (c) => {
     payment_providers: d.paymentProviders,
     join_mode: d.joinMode,
     join_link: d.joinLink,
+    free_pass_hours: d.freePassHours,
     coins: {
       enabled: d.coins.enabled,
       free_coins: d.coins.freeCoins,
@@ -315,7 +308,7 @@ bots.patch("/:botId", async (c) => {
   const body = await readJson(c);
   const update: BotSettingsUpdate = {};
 
-  for (const field of ["one_time_price", "monthly_price", "image_unlock_price"] as const) {
+  for (const field of ["one_time_price", "monthly_price", "daily_price", "weekly_price", "image_unlock_price"] as const) {
     const value = optNumber(body, field, PRICE);
     if (value !== undefined) update[field] = value;
   }
@@ -335,6 +328,16 @@ bots.patch("/:botId", async (c) => {
   }
   const fxRate = optNumber(body, "fx_rate", { min: 0.000001 });
   if (fxRate !== undefined) update.fx_rate = fxRate;
+
+  const priceCurrency = optString(body, "price_currency", 8);
+  if (priceCurrency) {
+    const wanted = priceCurrency.toUpperCase();
+    const charging = update.currency ?? bot.currency;
+    if (wanted !== "USD" && wanted !== charging) {
+      throw new HttpError(422, `'price_currency' must be USD or the currency Paystack charges in (${charging}).`);
+    }
+    update.price_currency = wanted;
+  }
 
   const groupChatId = optNumber(body, "group_chat_id", { integer: true });
   if (groupChatId !== undefined) update.group_chat_id = groupChatId;
@@ -358,6 +361,7 @@ bots.patch("/:botId", async (c) => {
       free_coins: body.free_coins,
       unlock_cost: body.unlock_cost,
       coin_packs: body.coin_packs,
+      free_pass_hours: body.free_pass_hours,
     }),
   );
 

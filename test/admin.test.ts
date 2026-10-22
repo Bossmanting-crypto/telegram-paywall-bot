@@ -173,7 +173,7 @@ describe("platform overview", () => {
     expect(overview.body.creators).toEqual({ total: 1, on_free_trial: 1 });
     const tenants = await call("GET", "/admin/tenants", { headers: asAdmin });
     expect(tenants.body.count).toBe(1);
-    expect(tenants.body.tenants[0]).toMatchObject({ email: "a@example.com", tier: "free", platform_cut: 0.15, active: true });
+    expect(tenants.body.tenants[0]).toMatchObject({ email: "a@example.com", tier: "free", platform_cut: 0.12, active: true });
     expect(tenants.text).not.toContain("pbk_");
   });
 

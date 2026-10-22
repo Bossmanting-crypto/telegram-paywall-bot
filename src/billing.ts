@@ -174,14 +174,14 @@ export async function recordFeesPaid(env: AppEnv, tenantId: string, amount: numb
   }
 }
 
-/** Starter plans bought in the dashboard that have run out go back to an ended trial. */
+/** Starter plans bought in the dashboard that have run out go back to the standard rate. Bots keep selling. */
 export async function expireStarterPlans(env: AppEnv, at: number): Promise<string[]> {
   const { results } = await env.DB.prepare(
-    `UPDATE tenants SET tier = 'free', platform_cut = MAX(platform_cut, ?2), trial_ends_at = ?1, plan_expires_at = NULL
+    `UPDATE tenants SET tier = 'free', platform_cut = MAX(platform_cut, ?2), trial_ends_at = NULL, plan_expires_at = NULL
      WHERE tier = 'starter' AND plan_expires_at IS NOT NULL AND plan_expires_at <= ?1
      RETURNING id`,
   )
-    .bind(at, TIER_CUT.free ?? 0.15)
+    .bind(at, TIER_CUT.free ?? 0.12)
     .all<{ id: string }>();
   return results.map((r) => r.id);
 }

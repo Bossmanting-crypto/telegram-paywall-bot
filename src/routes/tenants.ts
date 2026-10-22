@@ -1,5 +1,6 @@
 /** /api/v1/tenants — signup, profile, API key rotation. */
 
+import { saleRate } from "../rates";
 import { Hono } from "hono";
 import { billingStatus, createPlatformPayment } from "../billing";
 import { iso, PROVIDERS, type Provider } from "../db";
@@ -56,13 +57,23 @@ tenants.post("/signup", async (c) => {
 });
 
 tenants.get("/me", requireTenant, async (c) => {
-  const a = await accountSummary(c.env, c.get("tenant"));
+  const tenant = c.get("tenant");
+  const [a, rate] = await Promise.all([
+    accountSummary(c.env, tenant),
+    saleRate(c.env, { id: tenant.id, tier: tenant.tier, platformCut: tenant.platform_cut }),
+  ]);
   return c.json({
     id: a.id,
     email: a.email,
     name: a.name,
     tier: a.tier,
-    platform_cut: percent(a.platformCut),
+    platform_cut: percent(rate.cut),
+    volume_pricing: rate.ladder
+      ? {
+          sales_last_30_days: `$${rate.volumeUsd.toFixed(2)}`,
+          next: rate.next ? { from_usd: rate.next.fromUsd, platform_cut: percent(rate.next.cut) } : null,
+        }
+      : null,
     api_key_hint: a.apiKeyHint,
     bots: a.bots,
     trial_ends: a.trialEndsAt,

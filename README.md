@@ -148,11 +148,17 @@ Everything the dashboard does is also available through the API. Other creators 
 
 ### Plans
 
-| Tier | Platform cut | Limits |
-|---|---|---|
-| `free` | 15% | 1 bot, 10 paying members, 14 days — then the bot stops selling until upgraded |
-| `starter` | 8% | Unlimited bots and members |
-| `whitelabel` | 0% | Unlimited |
+No plan has limits on bots or members, and none expires.
+
+| Tier | Platform cut |
+|---|---|
+| `free` (Standard) | Falls with the creator's confirmed sales over the last 30 days: 12% to start, 10% from $1,000, 8% from $5,000, 6% from $20,000 |
+| `starter` | Flat 5% |
+| `whitelabel` | 0% |
+
+The rate applies to group plans (daily, weekly, monthly, lifetime) and pay-per-post (coins, Image Vault), and is fixed on each payment when it's created. A custom `platform_cut` you set for a creator overrides the ladder. The ladder and the planned rates for escrow trades (half) and hiring workers or agents (+3 points) live in `src/env.ts` (`VOLUME_LADDER`, `OFFERING_RATE`).
+
+Bots can also offer newcomers a **free pass** (`free_pass_hours`, 1–720): they get in free once, the bot warns them before it ends, removes them if they haven't paid, and follows up once a day later with the plans and a one-tap pay button.
 
 Creators cannot change their own plan. After they pay you, set it yourself:
 

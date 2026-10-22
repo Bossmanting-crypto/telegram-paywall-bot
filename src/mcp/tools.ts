@@ -14,6 +14,7 @@ import { McpServer, preloadSchemas, type CallToolResult } from "@modelcontextpro
 import * as z from "zod/v4";
 import { billingStatus } from "../billing";
 import { checkBot, summarise } from "../checks";
+import { formatAmount } from "../pricing";
 import { loadTenantBot, type AccessType, type BotConfig, type Provider, type TenantRow } from "../db";
 import type { AppEnv } from "../env";
 import { HttpError, ProviderError, logError, money } from "../lib/http";
@@ -89,7 +90,8 @@ const limitArg = (fallback: number) =>
   z.number().int().min(1).max(100).default(fallback).describe("Maximum number of results to return");
 const offsetArg = z.number().int().min(0).default(0).describe("Number of results to skip, for pagination");
 
-const price = (what: string) => z.number().min(0).max(100000).optional().describe(`${what} in USD; 0 turns it off`);
+const price = (what: string) =>
+  z.number().min(0).max(1000000).optional().describe(`${what}, in the bot's price currency (USD unless price_currency is set); 0 turns it off`);
 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 
@@ -177,6 +179,17 @@ function describeChoices(bots: Array<{ id: string; botUsername: string | null }>
   return `Bots on this account: ${bots.map((b) => (b.botUsername ? `${b.botUsername} (${b.id})` : b.id)).join(", ")}.`;
 }
 
+/** "KSh 30/day, KSh 150/week, KSh 500/mo, KSh 3,000 lifetime" (plans that are on). */
+function planList(p: { currency: string; daily: number; weekly: number; monthly: number; one_time: number }): string {
+  const parts = [
+    p.daily > 0 ? `${formatAmount(p.currency, p.daily)}/day` : null,
+    p.weekly > 0 ? `${formatAmount(p.currency, p.weekly)}/week` : null,
+    p.monthly > 0 ? `${formatAmount(p.currency, p.monthly)}/mo` : null,
+    p.one_time > 0 ? `${formatAmount(p.currency, p.one_time)} lifetime` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(", ") : "none";
+}
+
 function botLabel(bot: BotConfig): string {
   return bot.username ? `@${bot.username}` : bot.id;
 }
@@ -194,7 +207,16 @@ const BOT_AND_FORMAT = z.strictObject({ bot: botArg, response_format: responseFo
 const UPDATE_BOT_INPUT = z.strictObject({
   bot: botArg,
   one_time_price: price("Price of lifetime access"),
+  daily_price: price("Price of 1 day's access"),
+  weekly_price: price("Price of 7 days' access"),
   monthly_price: price("Price of 30 days' access"),
+  price_currency: z
+    .string()
+    .trim()
+    .length(3)
+    .optional()
+    .describe("Currency the prices are written in: USD, or the currency Paystack charges in (e.g. KES). Change prices to match when switching."),
+  free_pass_hours: z.number().int().min(0).max(720).optional().describe("Free group access for newcomers, in hours (0 = off). When it ends, the bot asks them to pay to keep their spot."),
   image_unlock_price: price("Price of the image vault"),
   welcome_title: z.string().trim().max(256).optional().describe("Heading of the payment menu newcomers see"),
   welcome_text: z.string().trim().max(2000).optional().describe("Text under the heading"),
@@ -234,7 +256,7 @@ const REVOKE_ACCESS_INPUT = z.strictObject({ bot: botArg, telegram_id: telegramI
 const CREATE_PAYMENT_LINK_INPUT = z.strictObject({
   bot: botArg,
   telegram_id: telegramId,
-  access_type: z.enum(["one_time", "monthly", "image_unlock"]).describe("What the user is buying"),
+  access_type: z.enum(["daily", "weekly", "monthly", "one_time", "image_unlock"]).describe("What the user is buying"),
   provider: z
     .enum(["paystack", "nowpayments", "btcpay"])
     .optional()
@@ -345,14 +367,14 @@ function registerCreatorTools(server: McpServer, ctx: PaywallContext): void {
           group_chat_id: b.groupChatId,
           status: b.status,
           active_members: b.activeMembers,
-          prices_usd: b.prices,
+          prices: b.prices,
         })),
       };
       return reply(response_format, data, () => {
         if (bots.length === 0) return "This account has no bots yet.";
         const rows = bots.map(
           (b) =>
-            `| ${cell(b.botUsername)} | ${b.id} | ${cell(b.groupName)} | ${b.status} | ${b.activeMembers} | ${usd(b.prices.one_time)} / ${usd(b.prices.monthly)} / ${usd(b.prices.image_vault)} |`,
+            `| ${cell(b.botUsername)} | ${b.id} | ${cell(b.groupName)} | ${b.status} | ${b.activeMembers} | ${planList(b.prices)} |`,
         );
         return [
           `# Bots (${bots.length})`,
@@ -385,7 +407,8 @@ function registerCreatorTools(server: McpServer, ctx: PaywallContext): void {
         status: d.status,
         active_members: d.activeMembers,
         revenue_usd: { gross: d.revenue.grossUsd, platform_fee: d.revenue.platformFeeUsd, net: d.revenue.netUsd },
-        prices_usd: d.prices,
+        prices: d.prices,
+        free_pass_hours: d.freePassHours,
         paystack_currency: d.currency,
         paystack_rate_per_usd: d.fxRate,
         welcome_title: d.welcomeTitle,
@@ -406,7 +429,8 @@ function registerCreatorTools(server: McpServer, ctx: PaywallContext): void {
           `- Status: ${d.status}`,
           `- Group: ${d.groupName ?? "not linked yet"}${d.groupChatId ? ` (${d.groupChatId})` : ""}`,
           `- Paying members: ${d.activeMembers}`,
-          `- Prices: one-time ${usd(d.prices.one_time)}, monthly ${usd(d.prices.monthly)}, image vault ${d.prices.image_vault > 0 ? usd(d.prices.image_vault) : "off"}`,
+          `- Plans: ${planList(d.prices)}; image vault ${d.prices.image_vault > 0 ? formatAmount(d.prices.currency, d.prices.image_vault) : "off"}`,
+          `- Free pass for newcomers: ${d.freePassHours > 0 ? `${d.freePassHours} hours` : "off"}`,
           `- Paystack charges in ${d.currency} at ${d.fxRate} per USD`,
           `- Payment methods offered: ${d.paymentProviders.length ? d.paymentProviders.join(", ") : "none — buyers cannot pay"}`,
           `- Revenue: ${usd(d.revenue.grossUsd)} gross, ${usd(d.revenue.netUsd)} net`,
@@ -479,6 +503,15 @@ Examples:
       const update: BotSettingsUpdate = {};
       if (fields.one_time_price !== undefined) update.one_time_price = fields.one_time_price;
       if (fields.monthly_price !== undefined) update.monthly_price = fields.monthly_price;
+      if (fields.daily_price !== undefined) update.daily_price = fields.daily_price;
+      if (fields.weekly_price !== undefined) update.weekly_price = fields.weekly_price;
+      if (fields.price_currency !== undefined) {
+        const wanted = fields.price_currency.toUpperCase();
+        if (wanted !== "USD" && wanted !== b.currency) {
+          throw new HttpError(400, `price_currency must be USD or ${b.currency} (the currency Paystack charges in).`);
+        }
+        update.price_currency = wanted;
+      }
       if (fields.image_unlock_price !== undefined) update.image_unlock_price = fields.image_unlock_price;
       if (fields.welcome_title !== undefined) update.welcome_title = fields.welcome_title || null;
       if (fields.welcome_text !== undefined) update.welcome_text = fields.welcome_text || null;
@@ -493,15 +526,20 @@ Examples:
           free_coins: fields.free_coins,
           unlock_cost: fields.unlock_cost,
           coin_packs: fields.coin_packs,
+          free_pass_hours: fields.free_pass_hours,
         }),
       );
       if (Object.keys(update).length === 0) {
         throw new HttpError(400, "Nothing to change: pass at least one setting, such as monthly_price or status.");
       }
-      const oneTime = update.one_time_price ?? b.prices.one_time;
-      const monthly = update.monthly_price ?? b.prices.monthly;
-      if (oneTime <= 0 && monthly <= 0) {
-        throw new HttpError(400, "At least one of one_time_price and monthly_price must stay above 0.");
+      const plans = [
+        update.daily_price ?? b.prices.daily,
+        update.weekly_price ?? b.prices.weekly,
+        update.monthly_price ?? b.prices.monthly,
+        update.one_time_price ?? b.prices.one_time,
+      ];
+      if (plans.every((p) => p <= 0)) {
+        throw new HttpError(400, "At least one plan (daily, weekly, monthly or lifetime) must keep a price above 0.");
       }
       const changed = await updateBotSettings(env, b, update);
       let extra = "";
@@ -818,7 +856,7 @@ function registerAdminTools(server: McpServer, ctx: PaywallContext): void {
     "paywall_admin_set_creator_plan",
     {
       title: "Change a creator's plan (owner)",
-      description: `Move a creator to another plan once they have paid for it. Plans: 'free' (15% cut, 1 bot, 10 members, a fresh 14-day trial), 'starter' (8%, unlimited) or 'whitelabel' (0%). A paid plan also restarts bots stopped by an expired trial.
+      description: `Move a creator to another plan once they have paid for it. Plans: 'free' (the standard plan, no monthly fee, 12% per sale falling to 6% with volume), 'starter' (flat 5%) or 'whitelabel' (0%). None has limits on bots or members.
 
 platform_cut_percent overrides the plan's usual cut.`,
       inputSchema: ADMIN_SET_CREATOR_PLAN_INPUT,

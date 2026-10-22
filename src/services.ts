@@ -20,7 +20,7 @@ import {
   type TenantRow,
   type Tier,
 } from "./db";
-import { FREE_TRIAL_DAYS, OWNER_ID, TIER_CUT, type AppEnv, type Settings } from "./env";
+import { OWNER_ID, TIER_CUT, type AppEnv, type Settings } from "./env";
 import { maskSecret, newApiKey, newId, sha256Hex } from "./lib/crypto";
 import { HttpError, round2 } from "./lib/http";
 import { availableProviders, deliverAccess, removeAccess, webhookUrl } from "./payments";
@@ -90,7 +90,7 @@ export interface CreatedTenant {
   name: string;
   apiKey: string;
   cut: number;
-  trialEnds: number;
+  trialEnds: number | null;
   recoveryId: number | null;
 }
 
@@ -126,8 +126,8 @@ export async function createTenant(
   const apiKey = newApiKey();
   const id = newId();
   const created = now();
-  const trialEnds = created + FREE_TRIAL_DAYS * 86400;
-  const cut = TIER_CUT.free ?? 0.15;
+  const trialEnds = null; // No trial period: the standard plan has no end date and no caps.
+  const cut = TIER_CUT.free ?? 0.12;
   await env.DB.prepare(
     `INSERT INTO tenants (id, email, name, api_key_hash, api_key_prefix, tier, platform_cut, trial_ends_at, created_at,
                           recovery_telegram_id, signup_ip_hash)
@@ -192,14 +192,25 @@ export async function revenueOverview(env: AppEnv, tenant: TenantRow): Promise<R
 
 // ── Bots ─────────────────────────────────────────────────────────────────────
 
+/** Prices in the bot's price currency (see `currency` alongside). 0 = not offered. */
 export interface BotPrices {
-  one_time: number;
+  currency: string;
+  daily: number;
+  weekly: number;
   monthly: number;
+  one_time: number;
   image_vault: number;
 }
 
 export function botPrices(bot: BotConfig): BotPrices {
-  return { one_time: bot.prices.one_time, monthly: bot.prices.monthly, image_vault: bot.prices.image_unlock };
+  return {
+    currency: bot.priceCurrency,
+    daily: bot.prices.daily,
+    weekly: bot.prices.weekly,
+    monthly: bot.prices.monthly,
+    one_time: bot.prices.one_time,
+    image_vault: bot.prices.image_unlock,
+  };
 }
 
 export interface BotSummary {
@@ -216,7 +227,8 @@ export interface BotSummary {
 export async function listBots(env: AppEnv, tenantId: string): Promise<BotSummary[]> {
   const { results } = await env.DB.prepare(
     `SELECT b.id, b.group_name, b.group_chat_id, b.bot_username, b.status, b.created_at,
-            b.one_time_price, b.monthly_price, b.image_unlock_price,
+            b.one_time_price, b.monthly_price, b.image_unlock_price, b.daily_price, b.weekly_price,
+            b.price_currency, b.currency,
             (SELECT COUNT(*) FROM members m
               WHERE m.bot_id = b.id AND m.has_access = 1
                 AND (m.access_expires IS NULL OR m.access_expires > ?2)) AS member_count
@@ -233,6 +245,10 @@ export async function listBots(env: AppEnv, tenantId: string): Promise<BotSummar
       one_time_price: number | null;
       monthly_price: number | null;
       image_unlock_price: number | null;
+      daily_price: number | null;
+      weekly_price: number | null;
+      price_currency: string | null;
+      currency: string | null;
       member_count: number;
     }>();
 
@@ -251,8 +267,11 @@ export async function listBots(env: AppEnv, tenantId: string): Promise<BotSummar
       prices: isOwner
         ? botPrices(owner)
         : {
-            one_time: b.one_time_price ?? 10,
+            currency: (b.price_currency || "USD").toUpperCase() === (b.currency || "USD").toUpperCase() ? (b.price_currency || "USD").toUpperCase() : "USD",
+            daily: b.daily_price ?? 0,
+            weekly: b.weekly_price ?? 0,
             monthly: b.monthly_price ?? 5,
+            one_time: b.one_time_price ?? 10,
             image_vault: b.image_unlock_price ?? 20,
           },
       createdAt: iso(b.created_at),
@@ -278,6 +297,7 @@ export interface BotDetail {
   paymentProviders: string[];
   joinMode: "mute" | "approve";
   joinLink: string | null;
+  freePassHours: number;
   coins: { enabled: boolean; freeCoins: number; unlockCost: number; packs: Array<{ coins: number; price: number }> };
   contentItems: number;
   credentials: {
@@ -326,6 +346,7 @@ export async function botDetail(env: AppEnv, bot: BotConfig, base: string): Prom
     adminUserIds: bot.adminIds,
     paymentProviders: availableProviders(bot),
     joinMode: bot.joinMode,
+    freePassHours: bot.freePassHours,
     joinLink: bot.joinLink,
     coins: {
       enabled: bot.coins.enabled,
@@ -353,6 +374,11 @@ export interface BotSettingsUpdate {
   one_time_price?: number;
   monthly_price?: number;
   image_unlock_price?: number;
+  daily_price?: number;
+  weekly_price?: number;
+  /** "USD" or the bot's Paystack currency. */
+  price_currency?: string;
+  free_pass_hours?: number;
   welcome_title?: string | null;
   welcome_text?: string | null;
   group_description?: string | null;
@@ -427,6 +453,7 @@ export interface CoinAndJoinInput {
   free_coins?: unknown;
   unlock_cost?: unknown;
   coin_packs?: unknown;
+  free_pass_hours?: unknown;
 }
 
 function wholeNumber(value: unknown, field: string, min: number, max: number): number {
@@ -451,6 +478,7 @@ export function coinAndJoinSettings(input: CoinAndJoinInput): BotSettingsUpdate 
   }
   if (input.free_coins !== undefined) out.free_coins = wholeNumber(input.free_coins, "free_coins", 0, 100000);
   if (input.unlock_cost !== undefined) out.unlock_cost = wholeNumber(input.unlock_cost, "unlock_cost", 1, 100000);
+  if (input.free_pass_hours !== undefined) out.free_pass_hours = wholeNumber(input.free_pass_hours, "free_pass_hours", 0, 720);
   if (input.coin_packs !== undefined) {
     if (!Array.isArray(input.coin_packs) || input.coin_packs.length > MAX_COIN_PACKS) {
       throw new HttpError(422, `'coin_packs' must be a list of up to ${MAX_COIN_PACKS} packs.`);
@@ -803,7 +831,7 @@ export async function setCreatorPlan(
 ): Promise<{ tier: Tier; platformCut: number; trialEndsAt: string | null }> {
   await requireCreator(env, id);
   const cut = platformCut ?? TIER_CUT[tier] ?? 0;
-  const trialEnds = tier === "free" ? now() + FREE_TRIAL_DAYS * 86400 : null;
+  const trialEnds = null;
   await env.DB.batch([
     // A plan set by the owner has no end date.
     env.DB.prepare("UPDATE tenants SET tier = ?1, platform_cut = ?2, trial_ends_at = ?3, plan_expires_at = NULL WHERE id = ?4").bind(

@@ -1,7 +1,8 @@
 /**
  * Scheduled work, run every minute by the Cron Trigger:
- *   • revoke monthly subscriptions that have run out,
- *   • stop bots whose creator's free trial has ended,
+ *   • revoke plans that have run out (even minutes),
+ *   • free passes: a heads-up, the end, and one follow-up a day later (odd minutes),
+ *   • end self-serve Starter plans that have run out (every 15 minutes),
  *   • deliver queued /broadcast messages a batch at a time.
  *
  * Batches are small on purpose: the Workers free plan allows 50 outbound
@@ -11,13 +12,16 @@
 
 import { alertCreator } from "./alerts";
 import { expireStarterPlans } from "./billing";
-import { loadBot, now, type BotConfig } from "./db";
+import { keepYourSpot, passKeyboard } from "./bot/handlers";
+import { hasValidAccess, loadBot, now, type BotConfig, type MemberRow } from "./db";
 import type { AppEnv } from "./env";
 import { log, logError } from "./lib/http";
 import { removeAccess } from "./payments";
 import { sendMessage, tg } from "./telegram";
 
 const EXPIRY_BATCH = 8;
+const PASS_BATCH = 4;
+const FOLLOWUP_DELAY = 86400;
 const BROADCAST_BATCH = 20;
 
 export async function runCron(env: AppEnv, scheduledTime: number): Promise<void> {
@@ -32,27 +36,23 @@ export async function runCron(env: AppEnv, scheduledTime: number): Promise<void>
     return cache.get(id) ?? null;
   };
 
-  await expireSubscriptions(env, bot);
-  if (new Date(scheduledTime).getUTCMinutes() % 15 === 0) {
-    await endStarterPlans(env, bot);
-    await expireTrials(env);
-  }
+  // Alternate minutes keep each run inside the free plan's request budget.
+  if (new Date(scheduledTime).getUTCMinutes() % 2 === 0) await expireSubscriptions(env, bot);
+  else await runFreePasses(env, bot);
+  if (new Date(scheduledTime).getUTCMinutes() % 15 === 0) await endStarterPlans(env, bot);
   await deliverBroadcast(env, bot);
 }
 
-async function expireSubscriptions(
-  env: AppEnv,
-  bot: (id: string) => Promise<BotConfig | null>,
-): Promise<void> {
+async function expireSubscriptions(env: AppEnv, bot: BotLoader): Promise<void> {
   const { results } = await env.DB.prepare(
-    `SELECT m.id, m.bot_id, m.telegram_id
+    `SELECT m.*
      FROM members m JOIN bots b ON b.id = m.bot_id
      WHERE m.has_access = 1 AND m.access_expires IS NOT NULL AND m.access_expires <= ?1
        AND b.status = 'active'
      ORDER BY m.access_expires LIMIT ?2`,
   )
     .bind(now(), EXPIRY_BATCH)
-    .all<{ id: string; bot_id: string; telegram_id: number }>();
+    .all<MemberRow>();
   if (results.length === 0) return;
 
   // Mark them expired first, so a Telegram failure can't cause a member to be
@@ -76,10 +76,87 @@ async function expireSubscriptions(
     await sendMessage(
       config.token,
       m.telegram_id,
-      "⚠️ Your monthly subscription has expired. Renew to regain access:",
-      { reply_markup: { inline_keyboard: [[{ text: "🔄 Renew access", callback_data: "start_pay" }]] } },
+      "⏳ <b>Your access has ended.</b> Renew to keep your spot:",
+      renewKeyboard(config, m),
     ).catch(() => undefined);
     log("subscription expired", { bot_id: m.bot_id, telegram_id: m.telegram_id });
+  }
+}
+
+function renewKeyboard(config: BotConfig, member: MemberRow): Record<string, unknown> {
+  const offer = passKeyboard(config, member);
+  return "reply_markup" in offer
+    ? offer
+    : { reply_markup: { inline_keyboard: [[{ text: "🔄 Renew access", callback_data: "start_pay" }]] } };
+}
+
+type BotLoader = (id: string) => Promise<BotConfig | null>;
+
+/** Free passes: warn before the end, end them, and follow up once a day later. */
+async function runFreePasses(env: AppEnv, bot: BotLoader): Promise<void> {
+  const at = now();
+
+  // 1. Heads-up: three hours before the end, or halfway through a short pass.
+  const warn = await env.DB.prepare(
+    `SELECT m.* FROM members m JOIN bots b ON b.id = m.bot_id
+     WHERE m.pass_expires IS NOT NULL AND m.pass_expires > ?1 AND m.pass_warned = 0
+       AND m.pass_expires - ?1 <= MIN(10800, b.free_pass_hours * 1800)
+       AND b.status = 'active'
+     ORDER BY m.pass_expires LIMIT ?2`,
+  )
+    .bind(at, PASS_BATCH)
+    .all<MemberRow>();
+  for (const m of warn.results) {
+    const claimed = await env.DB.prepare("UPDATE members SET pass_warned = 1 WHERE id = ?1 AND pass_warned = 0").bind(m.id).run();
+    if (claimed.meta.changes === 0 || hasValidAccess(m, at)) continue;
+    const config = await bot(m.bot_id);
+    if (!config?.token) continue;
+    const { text, extra } = keepYourSpot(config, m, "warning");
+    await sendMessage(config.token, m.telegram_id, text, extra).catch(() => undefined);
+  }
+
+  // 2. The end: take the spot back unless they've paid, and offer the plans.
+  const ended = await env.DB.prepare(
+    `SELECT m.* FROM members m JOIN bots b ON b.id = m.bot_id
+     WHERE m.pass_expires IS NOT NULL AND m.pass_expires <= ?1 AND b.status = 'active'
+     ORDER BY m.pass_expires LIMIT ?2`,
+  )
+    .bind(at, PASS_BATCH)
+    .all<MemberRow>();
+  for (const m of ended.results) {
+    const claimed = await env.DB.prepare(
+      "UPDATE members SET pass_expires = NULL, pass_ended_at = ?2 WHERE id = ?1 AND pass_expires IS NOT NULL AND pass_expires <= ?2",
+    )
+      .bind(m.id, at)
+      .run();
+    if (claimed.meta.changes === 0) continue;
+    const member = { ...m, pass_expires: null };
+    if (hasValidAccess(member, at)) continue; // paid during the pass
+    const config = await bot(m.bot_id);
+    if (!config?.token) continue;
+    await removeAccess(config, m.telegram_id);
+    const { text, extra } = keepYourSpot(config, member, "ended");
+    await sendMessage(config.token, m.telegram_id, text, extra).catch(() => undefined);
+    log("free pass ended", { bot_id: m.bot_id, telegram_id: m.telegram_id });
+  }
+
+  // 3. One gentle follow-up a day later, only if they still haven't paid.
+  const later = await env.DB.prepare(
+    `SELECT m.* FROM members m JOIN bots b ON b.id = m.bot_id
+     WHERE m.pass_ended_at IS NOT NULL AND m.followup_sent = 0 AND m.pass_ended_at <= ?1
+       AND b.status = 'active'
+     ORDER BY m.pass_ended_at LIMIT ?2`,
+  )
+    .bind(at - FOLLOWUP_DELAY, PASS_BATCH)
+    .all<MemberRow>();
+  for (const m of later.results) {
+    const claimed = await env.DB.prepare("UPDATE members SET followup_sent = 1 WHERE id = ?1 AND followup_sent = 0").bind(m.id).run();
+    if (claimed.meta.changes === 0 || hasValidAccess(m, at)) continue;
+    const config = await bot(m.bot_id);
+    if (!config?.token) continue;
+    const { text, extra } = keepYourSpot(config, m, "followup");
+    if (!("reply_markup" in extra)) continue; // nothing to offer right now
+    await sendMessage(config.token, m.telegram_id, text, extra).catch(() => undefined);
   }
 }
 
@@ -94,22 +171,10 @@ async function endStarterPlans(env: AppEnv, bot: (id: string) => Promise<BotConf
     for (const row of results) {
       const config = await bot(row.id);
       if (config) {
-        await alertCreator(env, config, "plan-ended", "Your Starter plan has ended, so this bot has stopped selling. Renew it in the dashboard (Account) to start again. Paying members keep their access.");
+        await alertCreator(env, config, "plan-ended", "Your Starter plan has ended, so your fee per sale is back to the standard rate. Your bot keeps selling as normal. Renew Starter in the dashboard (Account) any time.");
       }
     }
   }
-}
-
-async function expireTrials(env: AppEnv): Promise<void> {
-  const result = await env.DB.prepare(
-    `UPDATE bots SET status = 'expired'
-     WHERE status = 'active' AND tenant_id IN (
-       SELECT id FROM tenants WHERE tier = 'free' AND trial_ends_at IS NOT NULL AND trial_ends_at <= ?1
-     )`,
-  )
-    .bind(now())
-    .run();
-  if (result.meta.changes > 0) log("free trials ended", { bots_stopped: result.meta.changes });
 }
 
 async function deliverBroadcast(

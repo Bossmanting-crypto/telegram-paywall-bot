@@ -367,7 +367,7 @@ describe.each<Mode>(["legacy", "modern"])("MCP tools over the %s protocol", (mod
     const client = await connect(await signIn(t.apiKey), mode);
 
     const account = await client.callTool({ name: "paywall_get_account", arguments: { response_format: "json" } });
-    expect(account.structuredContent).toMatchObject({ name: "Ada", plan: "free", platform_cut: 0.15, platform_owner: false, bots: 1 });
+    expect(account.structuredContent).toMatchObject({ name: "Ada", plan: "free", platform_cut: 0.12, platform_owner: false, bots: 1 });
 
     const bots = await client.callTool({ name: "paywall_list_bots", arguments: {} });
     expect(textOf(bots)).toContain("@bot200000001");

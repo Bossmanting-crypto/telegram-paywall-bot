@@ -1,6 +1,6 @@
 /** Row types, the resolved per-bot configuration, and shared queries. */
 
-import { MONTHLY_ACCESS_DAYS, OWNER_ID, type AppEnv } from "./env";
+import { OWNER_ID, type AppEnv } from "./env";
 import { decryptWithKey, deriveKey, encryptionConfigured, newId } from "./lib/crypto";
 import { HttpError } from "./lib/http";
 
@@ -10,7 +10,13 @@ export const iso = (t: number | null | undefined): string | null =>
 
 export type Tier = "free" | "starter" | "whitelabel";
 export type BotStatus = "active" | "paused" | "expired" | "deleted";
-export type AccessType = "one_time" | "monthly" | "image_unlock";
+export type AccessType = "one_time" | "daily" | "weekly" | "monthly" | "image_unlock";
+/** Plans that give group access for a limited time. */
+export type TimedPlan = "daily" | "weekly" | "monthly";
+export const PLAN_SECONDS: Record<TimedPlan, number> = { daily: 86400, weekly: 7 * 86400, monthly: 30 * 86400 };
+export function isTimedPlan(value: string): value is TimedPlan {
+  return value === "daily" || value === "weekly" || value === "monthly";
+}
 /** What a payment bought: an access plan, or a pack of coins. */
 export type PaymentKind = AccessType | "coin_pack" | "platform_fee" | "starter_plan";
 export type JoinMode = "mute" | "approve";
@@ -31,7 +37,7 @@ export const DEFAULT_COIN_PACKS: readonly CoinPack[] = [
 export const MAX_COIN_PACKS = 3;
 export type Provider = "paystack" | "nowpayments" | "btcpay";
 
-export const ACCESS_TYPES: readonly AccessType[] = ["one_time", "monthly", "image_unlock"];
+export const ACCESS_TYPES: readonly AccessType[] = ["one_time", "daily", "weekly", "monthly", "image_unlock"];
 export const PROVIDERS: readonly Provider[] = ["paystack", "nowpayments", "btcpay"];
 
 export interface TenantRow {
@@ -66,6 +72,10 @@ export interface BotRow {
   one_time_price: number | null;
   monthly_price: number | null;
   image_unlock_price: number | null;
+  daily_price: number | null;
+  weekly_price: number | null;
+  price_currency: string;
+  free_pass_hours: number;
   currency: string | null;
   fx_rate: number | null;
   welcome_title: string | null;
@@ -102,6 +112,12 @@ export interface MemberRow {
   images_unlocked: number;
   coins: number;
   free_coins_granted: number;
+  pass_expires: number | null;
+  pass_used: number;
+  pass_warned: number;
+  pass_ended_at: number | null;
+  followup_sent: number;
+  last_provider: string | null;
   joined_at: number;
 }
 
@@ -141,10 +157,15 @@ export interface BotConfig {
   groupChatId: number | null;
   groupName: string | null;
   status: BotStatus;
+  /** Prices in `priceCurrency`. 0 means the plan isn't offered. */
   prices: Record<AccessType, number>;
+  /** Currency the prices are written in: "USD" or the Paystack currency. */
+  priceCurrency: string;
   /** Currency Paystack charges in, and how many units of it equal 1 USD. */
   currency: string;
   fxRate: number;
+  /** Free group pass for newcomers, in hours (0 = off). */
+  freePassHours: number;
   paystackChannels: string[] | null;
   welcomeTitle: string;
   welcomeText: string;
@@ -222,6 +243,12 @@ export function parseIdList(value: string | null | undefined): number[] {
     .filter((n) => Number.isSafeInteger(n) && n !== 0);
 }
 
+/** Prices can be written in USD or in the currency Paystack charges in, nothing else. */
+function priceCurrencyFor(stored: string | null | undefined, chargeCurrency: string): string {
+  const wanted = (stored || "USD").toUpperCase();
+  return wanted === chargeCurrency ? wanted : "USD";
+}
+
 function normaliseUrl(url: string): string {
   return url.trim().replace(/\/+$/, "");
 }
@@ -264,6 +291,7 @@ async function resolveBot(env: AppEnv, row: BotJoinRow): Promise<BotConfig> {
     trialEndsAt: row.t_trial_ends_at,
     lastNoticeMessageId: row.last_notice_message_id,
     joinMode: (row.join_mode === "approve" ? "approve" : "mute") as JoinMode,
+    freePassHours: Math.max(0, row.free_pass_hours ?? 0),
     joinLink: row.join_link ?? null,
     coins: {
       enabled: row.coins_enabled === 1,
@@ -288,9 +316,16 @@ async function resolveBot(env: AppEnv, row: BotJoinRow): Promise<BotConfig> {
       groupChatId: envNumber(env.GROUP_CHAT_ID) || row.group_chat_id,
       prices: {
         one_time: envNumber(env.ONE_TIME_PRICE_USD) ?? row.one_time_price ?? 10,
+        daily: row.daily_price ?? 0,
+        weekly: row.weekly_price ?? 0,
         monthly: envNumber(env.MONTHLY_PRICE_USD) ?? row.monthly_price ?? 5,
         image_unlock: envNumber(env.IMAGE_UNLOCK_PRICE_USD) ?? row.image_unlock_price ?? 0,
       },
+      // Prices set in Cloudflare are in USD, so they can't be mixed with local-currency ones.
+      priceCurrency:
+        envNumber(env.ONE_TIME_PRICE_USD) !== undefined || envNumber(env.MONTHLY_PRICE_USD) !== undefined || envNumber(env.IMAGE_UNLOCK_PRICE_USD) !== undefined
+          ? "USD"
+          : priceCurrencyFor(row.price_currency, currency),
       currency,
       fxRate: envNumber(env.PAYSTACK_FX_RATE) ?? row.fx_rate ?? (currency === "KES" ? 129 : 1),
       paystackChannels: channels.length ? channels : null,
@@ -333,9 +368,12 @@ async function resolveBot(env: AppEnv, row: BotJoinRow): Promise<BotConfig> {
     groupChatId: row.group_chat_id,
     prices: {
       one_time: row.one_time_price ?? 10,
+      daily: row.daily_price ?? 0,
+      weekly: row.weekly_price ?? 0,
       monthly: row.monthly_price ?? 5,
       image_unlock: row.image_unlock_price ?? 20,
     },
+    priceCurrency: priceCurrencyFor(row.price_currency, (row.currency || "USD").toUpperCase()),
     currency: (row.currency || "USD").toUpperCase(),
     fxRate: row.fx_rate ?? 1,
     paystackChannels: null,
@@ -441,33 +479,34 @@ export function memberGrantStatement(
   env: AppEnv,
   botId: string,
   telegramId: number,
-  accessType: "one_time" | "monthly" | "manual_grant",
+  accessType: TimedPlan | "one_time" | "manual_grant",
   pendingPaymentId: string | null = null,
 ): D1PreparedStatement {
   const at = now();
   const guard = `WHERE (?6 IS NULL OR EXISTS (SELECT 1 FROM payments WHERE id = ?6 AND status = 'pending'))`;
-  if (accessType === "monthly") {
+  if (isTimedPlan(accessType)) {
+    // A paid plan ends any free pass.
     return env.DB.prepare(
       `INSERT INTO members (id, bot_id, telegram_id, has_access, access_type, access_expires, joined_at)
-       SELECT ?1, ?2, ?3, 1, 'monthly', ?4 + ?5, ?4
+       SELECT ?1, ?2, ?3, 1, ?7, ?4 + ?5, ?4
        ${guard}
        ON CONFLICT(bot_id, telegram_id) DO UPDATE SET
          access_type = CASE
            WHEN members.has_access = 1 AND members.access_expires IS NULL THEN members.access_type
-           ELSE 'monthly' END,
+           ELSE ?7 END,
          access_expires = CASE
            WHEN members.has_access = 1 AND members.access_expires IS NULL THEN NULL
            WHEN members.has_access = 1 AND members.access_expires > ?4 THEN members.access_expires + ?5
            ELSE ?4 + ?5 END,
-         has_access = 1`,
-    ).bind(newId(), botId, telegramId, at, MONTHLY_ACCESS_DAYS * 86400, pendingPaymentId);
+         has_access = 1, pass_expires = NULL`,
+    ).bind(newId(), botId, telegramId, at, PLAN_SECONDS[accessType], pendingPaymentId, accessType);
   }
   return env.DB.prepare(
     `INSERT INTO members (id, bot_id, telegram_id, has_access, access_type, access_expires, joined_at)
      SELECT ?1, ?2, ?3, 1, ?5, NULL, ?4
      ${guard}
      ON CONFLICT(bot_id, telegram_id) DO UPDATE SET
-       has_access = 1, access_type = excluded.access_type, access_expires = NULL`,
+       has_access = 1, access_type = excluded.access_type, access_expires = NULL, pass_expires = NULL`,
   ).bind(newId(), botId, telegramId, at, accessType, pendingPaymentId);
 }
 

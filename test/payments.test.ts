@@ -58,8 +58,8 @@ describe("creating payment links", () => {
 
     expect(p.order_id).toMatch(/^5550001-[0-9a-f]{12}$/);
     expect(p.amount).toBe(10);
-    expect(p.platform_fee).toBe(1.5);
-    expect(p.net_to_creator).toBe(8.5);
+    expect(p.platform_fee).toBe(1.2);
+    expect(p.net_to_creator).toBe(8.8);
     expect(p.payment_url).toBe(`https://checkout.paystack.com/${p.order_id}`);
 
     const init = mock.calls.find((c) => c.url.endsWith("/transaction/initialize"));
@@ -160,23 +160,17 @@ describe("creating payment links", () => {
     expect((await post({ access_type: "one_time", provider: "paystack" })).status).toBe(409);
   });
 
-  it("caps the free tier at 10 paying members", async () => {
+  it("has no cap on paying members on the standard plan", async () => {
     const t = await signup();
     const bot = await createBot(t.headers, 1);
-    for (let i = 1; i <= 10; i++) {
+    for (let i = 1; i <= 12; i++) {
       await call("POST", `/api/v1/bots/${bot.id}/members/${9000 + i}/grant`, { headers: t.headers });
     }
-    const full = await call("POST", "/api/v1/payments/generate-link", {
+    const more = await call("POST", "/api/v1/payments/generate-link", {
       headers: t.headers,
       json: { bot_id: bot.id, telegram_id: BUYER, access_type: "one_time", provider: "paystack" },
     });
-    expect(full.status).toBe(403);
-    // An existing member can still renew.
-    const renew = await call("POST", "/api/v1/payments/generate-link", {
-      headers: t.headers,
-      json: { bot_id: bot.id, telegram_id: 9001, access_type: "monthly", provider: "paystack" },
-    });
-    expect(renew.status).toBe(200);
+    expect(more.status).toBe(200);
   });
 
   it("routes the platform cut to a Paystack subaccount when one is set", async () => {
@@ -186,8 +180,8 @@ describe("creating payment links", () => {
     expect(set.status).toBe(200);
     await link(t.headers, bot.id, "paystack");
     const init = mock.calls.find((c) => c.url.endsWith("/transaction/initialize"));
-    // $10 at 15%: the creator's own account keeps $8.50, the subaccount gets the rest.
-    expect(init?.body).toMatchObject({ amount: 1000, subaccount: "ACCT_abc123", transaction_charge: 850, bearer: "account" });
+    // $10 at 12%: the creator's own account keeps $8.80, the subaccount gets the rest.
+    expect(init?.body).toMatchObject({ amount: 1000, subaccount: "ACCT_abc123", transaction_charge: 880, bearer: "account" });
   });
 });
 
@@ -216,7 +210,7 @@ describe("Paystack webhook", () => {
     expect(String(notice?.body?.text)).toContain("Payment confirmed");
 
     const overview = await call("GET", "/api/v1/analytics/overview", { headers: t.headers });
-    expect(overview.body.all_time).toEqual({ gross: 10, platform_fee: 1.5, net: 8.5, transactions: 1 });
+    expect(overview.body.all_time).toEqual({ gross: 10, platform_fee: 1.2, net: 8.8, transactions: 1 });
     expect(overview.body.active_members).toBe(1);
   });
 

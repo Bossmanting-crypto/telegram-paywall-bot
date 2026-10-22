@@ -5,7 +5,7 @@
  *   /openapi.json   an OpenAPI 3.1 description of the creator API
  */
 
-import { FREE_BOT_LIMIT, FREE_MEMBER_LIMIT, FREE_TRIAL_DAYS, PLAN_DAYS, TIER_CUT } from "../env";
+import { PLAN_DAYS, TIER_CUT, VOLUME_LADDER } from "../env";
 import { GUIDES } from "./guides";
 import type { SiteContext } from "./pages";
 
@@ -20,7 +20,7 @@ export function llmsTxt(info: AgentInfo): string {
     : "by arrangement with the platform owner";
   return `# ${info.name}
 
-> Charge for access to a Telegram group. A creator connects a Telegram bot and their own Paystack (cards, bank, M-Pesa) or NOWPayments (crypto) account; the bot takes payments, lets paying members in, removes them when a monthly plan ends, and can sell individual content items for coins. Buyers pay the creator directly. Agents and bots may sign up and operate accounts through the API or MCP.
+> Charge for access to a Telegram group. A creator connects a Telegram bot and their own Paystack (cards, bank, M-Pesa) or NOWPayments (crypto) account; the bot takes payments, lets paying members in (daily, weekly, monthly or lifetime plans, priced in USD or the Paystack currency such as KES), removes them when a plan ends, and can sell individual content items for coins. Buyers pay the creator directly. Agents and bots may sign up and operate accounts through the API or MCP.
 
 ## Quick start for agents
 
@@ -37,8 +37,10 @@ ${info.signupsOpen ? "Signups are open." : "Signups are currently closed."} Erro
 
 ## Pricing
 
-- Free trial: ${FREE_TRIAL_DAYS} days, ${FREE_BOT_LIMIT} bot, up to ${FREE_MEMBER_LIMIT} paying members, ${pct(TIER_CUT.free, 0.15)} platform fee per sale.
-- Starter: ${pct(TIER_CUT.starter, 0.08)} per sale, unlimited bots and members; ${starter}.
+- Standard: free to start, no monthly fee. Platform fee per sale by the creator's confirmed sales over the last 30 days: ${[...VOLUME_LADDER].reverse().map((s) => `${pct(s.cut, 0)} from $${s.fromUsd.toLocaleString("en-US")}`).join(", ")}. GET /api/v1/tenants/me shows the current rate and the next step.
+- Starter: flat ${pct(TIER_CUT.starter, 0.05)} per sale; ${starter}.
+- The same rate applies to group plans (daily, weekly, monthly, lifetime) and pay-per-post (coins, Image Vault).
+- Optional free pass: a bot can let newcomers in free for 1 to 720 hours (free_pass_hours), then offer the plans.
 - Platform fees accrue per sale and are paid with POST /api/v1/tenants/pay-fees (see GET /api/v1/tenants/billing).
 
 ## Guides
@@ -116,7 +118,7 @@ export function openApi(info: AgentInfo): Record<string, unknown> {
     paths: {
       "/api/v1/tenants/signup": {
         post: {
-          summary: "Create an account (free trial)",
+          summary: "Create an account (free to start)",
           requestBody: json({
             type: "object",
             required: ["name", "email"],

@@ -26,9 +26,9 @@ describe("landing page", () => {
 
   it("shows the plan fees from the code, not hard-coded copy", async () => {
     const page = await call("GET", "/", { headers: HTML });
-    expect(page.text).toContain('data-free="0.15" data-starter="0.08"');
-    expect(page.text).toContain("on Starter (8% fee)");
-    expect(page.text).toContain("The free trial is 14 days, 1 bot and up to 10 paying members.");
+    expect(page.text).toContain('data-ladder="[[20000,0.06],[5000,0.08],[1000,0.1],[0,0.12]]"');
+    expect(page.text).toContain("Fee by sales in the last 30 days: 12% to start, 10% from $1,000, 8% from $5,000, 6% from $20,000.");
+    expect(page.text).not.toContain("trial");
   });
 
   it("uses the platform name and contact, escaped", async () => {
@@ -41,7 +41,7 @@ describe("landing page", () => {
 
   it("hides the trial button when signups are closed", async () => {
     const page = await call("GET", "/", { headers: HTML, env: envWith({ ALLOW_SIGNUPS: "false" }) });
-    expect(page.text).not.toContain("free trial</a>");
+    expect(page.text).not.toContain("Start now</a>");
     expect(page.text).toContain("signups are paused");
   });
 });
@@ -116,8 +116,10 @@ describe("esc", () => {
 describe("public site", () => {
   it("says you only pay when you get paid only when Starter has no price", async () => {
     const page = await call("GET", "/", { headers: HTML });
-    expect(page.text).toContain("You only pay when you get paid.");
-    expect(page.text).toContain("Build yours in 7 minutes");
+    expect(page.text).toContain("You only pay when you get paid: 12% of each sale, falling to 6% as you grow.");
+    expect(page.text).toContain(">Start now</a>");
+    expect(page.text).not.toContain("7 minutes");
+    expect(page.text.match(/in minutes/g)).toHaveLength(1); // speed, mentioned once
     expect(page.text).not.toMatch(/\bdemo\b/i);
     expect(page.text).toContain('<link rel="canonical" href="https://paywall.test/">');
     expect(page.headers.get("content-security-policy")).toContain("font-src 'self'");
@@ -176,13 +178,15 @@ describe("public site", () => {
 
   it("shows a worked earnings example without script, and serves the calculator", async () => {
     const page = await call("GET", "/", { headers: HTML });
-    // 60 members × $5 = $300; Starter keeps 92% → $276; trial keeps 85% → $255.
-    expect(page.text).toContain('<span class="calc-keep" id="calc-keep">$276</span>');
-    expect(page.text).toContain("$255 during the free trial");
+    // 60 members × $5 = $300 a month; the 12% fee leaves $264.
+    expect(page.text).toContain('<span class="calc-keep" id="calc-keep">$264</span>');
+    expect(page.text).toContain('data-currency="KES"');
+    expect(page.text).toContain('data-period="day"');
     expect(page.text).toContain('<script src="/assets/home.js" defer></script>');
     const js = await call("GET", "/assets/home.js");
     expect(js.headers.get("content-type")).toContain("text/javascript");
     expect(js.text).toContain("data-calc");
+    expect(js.text).toContain("KSh ");
     expect(js.text).not.toMatch(/innerHTML|eval\(/);
   });
 

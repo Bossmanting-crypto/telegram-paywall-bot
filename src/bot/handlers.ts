@@ -50,7 +50,8 @@ import { alertCreator } from "../alerts";
 import { ensureJoinLink } from "../group";
 import { newId } from "../lib/crypto";
 import { queueBroadcast, rotateTenantKey } from "../services";
-import { HttpError, logError, money } from "../lib/http";
+import { HttpError, logError } from "../lib/http";
+import { formatPrice } from "../pricing";
 import {
   ACCESS_LABEL,
   availableProviders,
@@ -96,26 +97,77 @@ export async function handleUpdate(
 // ── Menus ────────────────────────────────────────────────────────────────────
 
 const PLAN_BUTTON: Record<AccessType, (price: string) => string> = {
-  one_time: (p) => `🔑 One-Time Access  $${p}`,
-  monthly: (p) => `🔄 Monthly Access  $${p}/mo`,
-  image_unlock: (p) => `🖼 Unlock Image Vault  $${p}`,
+  daily: (p) => `📅 Daily  ${p}/day`,
+  weekly: (p) => `🗓 Weekly  ${p}/week`,
+  monthly: (p) => `🔄 Monthly  ${p}/mo`,
+  one_time: (p) => `🔑 Lifetime  ${p}`,
+  image_unlock: (p) => `🖼 Unlock Image Vault  ${p}`,
 };
+const PLAN_SUFFIX: Record<AccessType, string> = { daily: " / day", weekly: " / week", monthly: " / month", one_time: "", image_unlock: "" };
+/** Group-access plans in the order they're offered. */
+const GROUP_PLANS = ["daily", "weekly", "monthly", "one_time"] as const;
+
+const PAY_AGAIN_LABEL: Record<Provider, (bot: BotConfig) => string> = {
+  paystack: (bot) => (bot.currency === "KES" ? "M-Pesa" : "card"),
+  nowpayments: () => "crypto",
+  btcpay: () => "Bitcoin",
+};
+
+/**
+ * The "keep your access" offer: the group plans (weekly and monthly first,
+ * with the saving shown), plus a one-tap "pay again" button for someone who
+ * has paid before, using the method they used last time.
+ */
+function planOffer(bot: BotConfig, member: MemberRow | null, label: "unlimited" | "plain" = "plain"): InlineButton[][] {
+  if (hasValidAccess(member) && member?.access_expires === null) return [];
+  const p = bot.prices;
+  const rows: InlineButton[][] = [];
+  const saving = p.weekly > 0 && p.monthly > 0 ? Math.round((1 - p.monthly / ((p.weekly * 30) / 7)) * 100) : 0;
+  const per: Record<string, string> = { daily: "/day", weekly: "/week", monthly: "/mo" };
+  for (const type of ["weekly", "monthly", "daily", "one_time"] as const) {
+    if (!(p[type] > 0)) continue;
+    let text =
+      label === "unlimited"
+        ? type === "one_time"
+          ? `🔑 Unlimited forever · ${formatPrice(bot, p.one_time)}`
+          : `⭐ Go unlimited · ${formatPrice(bot, p[type])}${per[type]}`
+        : PLAN_BUTTON[type](formatPrice(bot, p[type]));
+    if (type === "monthly" && saving >= 5) text += `  · save ${saving}%`;
+    rows.push([{ text, callback_data: `access:${type}` }]);
+  }
+  const last = member?.last_provider as Provider | null | undefined;
+  const favourite = (["monthly", "weekly", "daily", "one_time"] as const).find((t) => p[t] > 0);
+  if (last && favourite && availableProviders(bot).includes(last)) {
+    rows.push([{
+      text: `⚡ Pay ${formatPrice(bot, p[favourite])}${PLAN_SUFFIX[favourite].replace(" / ", "/")} with ${PAY_AGAIN_LABEL[last](bot)}`,
+      callback_data: `pay:${favourite}:${last}`,
+    }]);
+  }
+  return rows;
+}
+
+/** "KSh 500", or for crypto on a shilling-priced bot "KSh 500 (about $3.88 in crypto)". */
+function amountText(bot: BotConfig, provider: Provider, price: number, usd: number): string {
+  const local = formatPrice(bot, price);
+  if (provider === "paystack" || bot.priceCurrency === "USD") return local;
+  return `${local} (about $${usd.toFixed(2)} in crypto)`;
+}
 
 /** Plans this user can buy right now, as keyboard rows. */
 async function planButtons(env: AppEnv, bot: BotConfig, member: MemberRow | null): Promise<InlineButton[][]> {
   const rows: InlineButton[][] = [];
   const lifetime = hasValidAccess(member) && member?.access_expires === null;
   if (!lifetime) {
-    for (const type of ["one_time", "monthly"] as const) {
+    for (const type of GROUP_PLANS) {
       if (bot.prices[type] > 0) {
-        rows.push([{ text: PLAN_BUTTON[type](money(bot.prices[type])), callback_data: `access:${type}` }]);
+        rows.push([{ text: PLAN_BUTTON[type](formatPrice(bot, bot.prices[type])), callback_data: `access:${type}` }]);
       }
     }
   }
   const contentCount = await countVaultImages(env, bot.id);
   if (bot.prices.image_unlock > 0 && member?.images_unlocked !== 1 && contentCount > 0) {
     rows.push([
-      { text: PLAN_BUTTON.image_unlock(money(bot.prices.image_unlock)), callback_data: "access:image_unlock" },
+      { text: PLAN_BUTTON.image_unlock(formatPrice(bot, bot.prices.image_unlock)), callback_data: "access:image_unlock" },
     ]);
   }
   if (bot.coins.enabled && contentCount > 0) {
@@ -132,21 +184,13 @@ async function planButtons(env: AppEnv, bot: BotConfig, member: MemberRow | null
 
 /** Plan buttons phrased as the "go unlimited" alternative to buying coins. */
 function unlimitedButtons(bot: BotConfig, member: MemberRow | null): InlineButton[][] {
-  if (hasValidAccess(member) && member?.access_expires === null) return [];
-  const rows: InlineButton[][] = [];
-  if (bot.prices.monthly > 0) {
-    rows.push([{ text: `⭐ Go unlimited · $${money(bot.prices.monthly)}/mo`, callback_data: "access:monthly" }]);
-  }
-  if (bot.prices.one_time > 0) {
-    rows.push([{ text: `⭐ Unlimited forever · $${money(bot.prices.one_time)}`, callback_data: "access:one_time" }]);
-  }
-  return rows;
+  return planOffer(bot, member, "unlimited");
 }
 
 function coinPackButtons(bot: BotConfig): InlineButton[][] {
   return bot.coins.packs.map((pack, i) => [
     {
-      text: `🪙 ${pack.coins} coins · $${money(pack.price)}${bot.coins.packs.length === 3 && i === 1 ? "  ⭐ popular" : ""}`,
+      text: `🪙 ${pack.coins} coins · ${formatPrice(bot, pack.price)}${bot.coins.packs.length === 3 && i === 1 ? "  ⭐ popular" : ""}`,
       callback_data: `cp:${i}`,
     },
   ]);
@@ -269,6 +313,18 @@ async function onChatMember(env: AppEnv, bot: BotConfig, upd: TgChatMemberUpdate
     return;
   }
 
+  // Free pass: newcomers get in free for a while, once per Telegram account.
+  if (passIsActive(member)) return;
+  if (await startPass(env, bot, member)) {
+    // They may have been muted on an earlier visit, before the pass was offered.
+    if (member.joined_at < now() - 60) {
+      await unrestrictMember(bot.token, bot.groupChatId, user.id).catch(() => undefined);
+    }
+    member.coins = await ensureFreeCoins(env, bot, member);
+    await sendMessage(bot.token, user.id, passWelcome(bot, user), passKeyboard(bot, member)).catch(() => undefined);
+    return;
+  }
+
   try {
     await restrictMember(bot.token, bot.groupChatId, user.id);
   } catch (error) {
@@ -344,6 +400,13 @@ async function onJoinRequest(env: AppEnv, bot: BotConfig, req: TgChatJoinRequest
     return;
   }
   member.coins = await ensureFreeCoins(env, bot, member);
+  if (passIsActive(member) || (await startPass(env, bot, member))) {
+    await tg(bot.token, "approveChatJoinRequest", { chat_id: bot.groupChatId, user_id: user.id }).catch((e) =>
+      logError("could not approve free-pass join request", e, { bot_id: bot.id, telegram_id: user.id }),
+    );
+    await sendMessage(bot.token, chatId, passWelcome(bot, user), passKeyboard(bot, member)).catch(() => undefined);
+    return;
+  }
   const group = bot.groupName ? `<b>${escapeHtml(bot.groupName)}</b>` : "the group";
   await sendPlanMenu(
     env,
@@ -353,6 +416,73 @@ async function onJoinRequest(env: AppEnv, bot: BotConfig, req: TgChatJoinRequest
     `👋 Hi <b>${escapeHtml(user.first_name || "there")}</b>! Thanks for asking to join ${group}.\n\n` +
       `${planMenuText(bot, member)}\n\n<i>You'll be let in automatically as soon as your payment is confirmed.</i>`,
   ).catch((e) => logError("could not message join requester", e, { bot_id: bot.id, telegram_id: user.id }));
+}
+
+// ── Free pass ────────────────────────────────────────────────────────────────
+
+export function passIsActive(member: MemberRow | null, at: number = now()): boolean {
+  return !!member && member.pass_expires !== null && member.pass_expires > at;
+}
+
+/** Start the newcomer's free pass if the bot offers one and they haven't had it. */
+async function startPass(env: AppEnv, bot: BotConfig, member: MemberRow): Promise<boolean> {
+  if (bot.freePassHours <= 0 || member.pass_used === 1) return false;
+  const expires = now() + bot.freePassHours * 3600;
+  const result = await env.DB.prepare(
+    `UPDATE members SET pass_expires = ?1, pass_used = 1, pass_warned = 0, pass_ended_at = NULL, followup_sent = 0
+     WHERE id = ?2 AND pass_used = 0`,
+  )
+    .bind(expires, member.id)
+    .run();
+  if (result.meta.changes === 0) return false;
+  member.pass_expires = expires;
+  member.pass_used = 1;
+  return true;
+}
+
+/** "3 days", "6 hours", "45 minutes". */
+export function duration(seconds: number): string {
+  const s = Math.max(60, seconds);
+  if (s >= 2 * 86400) return `${Math.round(s / 86400)} days`;
+  if (s >= 86400) return "1 day";
+  if (s >= 2 * 3600) return `${Math.round(s / 3600)} hours`;
+  if (s >= 3600) return "1 hour";
+  return `${Math.round(s / 60)} minutes`;
+}
+
+function groupName(bot: BotConfig): string {
+  return bot.groupName ? `<b>${escapeHtml(bot.groupName)}</b>` : "the group";
+}
+
+function passWelcome(bot: BotConfig, user: TgUser): string {
+  return (
+    `🎉 Welcome, <b>${escapeHtml(user.first_name || "there")}</b>! You have a <b>free ${duration(bot.freePassHours * 3600)} pass</b> to ${groupName(bot)}.\n\n` +
+    `Enjoy it. I'll let you know before it ends. Want to stay longer? Pick a plan any time:`
+  );
+}
+
+/** Plan buttons (weekly, monthly, …) plus one-tap pay with the member's last method. */
+export function passKeyboard(bot: BotConfig, member: MemberRow): Record<string, unknown> {
+  if (!botIsSelling(bot)) return {};
+  const rows = availableProviders(bot).length ? planOffer(bot, member) : [];
+  return rows.length ? { reply_markup: { inline_keyboard: rows } } : {};
+}
+
+/** The "keep your spot" message sent before and after a free pass ends. */
+export function keepYourSpot(
+  bot: BotConfig,
+  member: MemberRow,
+  stage: "warning" | "ended" | "followup",
+): { text: string; extra: Record<string, unknown> } {
+  const group = groupName(bot);
+  const left = member.pass_expires ? duration(member.pass_expires - now()) : "";
+  const text =
+    stage === "warning"
+      ? `⏰ <b>Your free pass ends in about ${left}.</b>\n\nKeep your spot in ${group}:`
+      : stage === "ended"
+        ? `⏳ <b>Your free pass has ended.</b>\n\nKeep your spot in ${group}. Pick a plan and you're straight back in:`
+        : `👋 Still thinking it over? Your spot in ${group} is waiting:`;
+  return { text, extra: passKeyboard(bot, member) };
 }
 
 // ── Content and coins ────────────────────────────────────────────────────────
@@ -558,6 +688,14 @@ async function onMessage(env: AppEnv, bot: BotConfig, msg: TgMessage): Promise<v
     return;
   }
 
+  if (!hasValidAccess(member) && passIsActive(member) && member.pass_expires) {
+    await reply(
+      `🎟 Your free pass to ${groupName(bot)} ends in about <b>${duration(member.pass_expires - now())}</b>.\n\nKeep your spot any time:`,
+      passKeyboard(bot, member),
+    );
+    return;
+  }
+
   if (hasValidAccess(member)) {
     // Also repairs the rare case where payment was recorded but the unlock
     // call to Telegram failed.
@@ -749,7 +887,7 @@ async function adminCommand(
           `Send me photos, videos, GIFs or files in this chat to add them. A caption becomes the teaser. /clearvault empties it.\n` +
           (bot.coins.enabled ? `Coins are on: each item costs <b>${bot.coins.unlockCost}</b>, new people get <b>${bot.coins.free}</b> free.\n` : "") +
           (bot.prices.image_unlock > 0
-            ? `Price: <b>$${money(bot.prices.image_unlock)}</b>`
+            ? `Price: <b>${formatPrice(bot, bot.prices.image_unlock)}</b>`
             : "The vault has no price set, so it is not on sale."),
       );
       return true;
@@ -907,7 +1045,7 @@ async function onCallback(env: AppEnv, bot: BotConfig, query: TgCallbackQuery, b
         { text: PROVIDER_BUTTON[provider](bot), callback_data: `cpay:${index}:${provider}` },
       ]);
       rows.push([{ text: "🔙 Back", callback_data: "coins" }]);
-      await show(`🪙 <b>${pack.coins} coins — $${money(pack.price)}</b>\n\nChoose your payment method:`, { inline_keyboard: rows });
+      await show(`🪙 <b>${pack.coins} coins — ${formatPrice(bot, pack.price)}</b>\n\nChoose your payment method:`, { inline_keyboard: rows });
       return;
     }
     const provider = PROVIDERS.includes(rawProvider as Provider) ? (rawProvider as Provider) : null;
@@ -920,7 +1058,7 @@ async function onCallback(env: AppEnv, bot: BotConfig, query: TgCallbackQuery, b
       const payment = await createCoinPayment(env, bot, { telegramId: user.id, packIndex: index, provider, baseUrl });
       await show(
         `✅ <b>Payment Link Ready!</b>\n\n${PROVIDER_NOTE[provider](bot)}\n\n` +
-          `You get: <b>${payment.coins} coins</b>\nAmount: <b>$${payment.amount.toFixed(2)}</b>\n` +
+          `You get: <b>${payment.coins} coins</b>\nAmount: <b>${amountText(bot, provider, pack.price, payment.amount)}</b>\n` +
           `Reference: <code>${payment.orderId}</code>\n\nCoins are added automatically once the payment is confirmed.`,
         {
           inline_keyboard: [
@@ -962,9 +1100,8 @@ async function onCallback(env: AppEnv, bot: BotConfig, query: TgCallbackQuery, b
       await show(UNAVAILABLE);
       return;
     }
-    const suffix = type === "monthly" ? " / month" : "";
     await show(
-      `💰 <b>${ACCESS_LABEL[type]} — $${bot.prices[type].toFixed(2)}${suffix}</b>\n\nChoose your payment method:`,
+      `💰 <b>${ACCESS_LABEL[type]} — ${formatPrice(bot, bot.prices[type])}${PLAN_SUFFIX[type]}</b>\n\nChoose your payment method:`,
       providerKeyboard(bot, type),
     );
     return;
@@ -994,7 +1131,7 @@ async function onCallback(env: AppEnv, bot: BotConfig, query: TgCallbackQuery, b
       await show(
         `✅ <b>Payment Link Ready!</b>\n\n` +
           `${PROVIDER_NOTE[provider](bot)}\n\n` +
-          `Amount: <b>$${payment.amount.toFixed(2)}</b>\n` +
+          `Amount: <b>${amountText(bot, provider, bot.prices[type], payment.amount)}</b>\n` +
           `Reference: <code>${payment.orderId}</code>\n\n` +
           `Tap the button below to pay. Access is granted automatically once the payment is confirmed.`,
         {
