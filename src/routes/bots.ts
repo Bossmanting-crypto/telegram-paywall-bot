@@ -2,19 +2,9 @@
 
 import { Hono } from "hono";
 import { checkBot, summarise, telegramWebhookUrl } from "../checks";
-import {
-  countActiveMembers,
-  iso,
-  loadTenantBot,
-  memberGrantStatement,
-  now,
-  parseIdList,
-  revokeMemberAccess,
-  type BotConfig,
-  type MemberRow,
-} from "../db";
+import { loadTenantBot, now, parseIdList } from "../db";
 import { FREE_BOT_LIMIT, OWNER_ID, type AppEnv } from "../env";
-import { encryptSecret, encryptionConfigured, maskSecret, newId, randomHex } from "../lib/crypto";
+import { encryptSecret, encryptionConfigured, newId, randomHex } from "../lib/crypto";
 import {
   HttpError,
   baseUrl,
@@ -24,8 +14,18 @@ import {
   reqString,
   type AppContext,
 } from "../lib/http";
-import { availableProviders, deliverAccess, removeAccess, webhookUrl } from "../payments";
+import { availableProviders } from "../payments";
 import { isAcceptableServerUrl } from "../providers/btcpay";
+import {
+  botDetail,
+  grantAccess,
+  listBots,
+  listMembers,
+  paymentWebhooks,
+  revokeAccess,
+  updateBotSettings,
+  type BotSettingsUpdate,
+} from "../services";
 import { ALLOWED_UPDATES, TelegramError, looksLikeBotToken, tg } from "../telegram";
 import { requireTenant } from "./auth";
 
@@ -42,21 +42,7 @@ async function encrypt(env: AppEnv, value: string): Promise<string> {
   return encryptSecret(env.ENCRYPTION_KEY, value);
 }
 
-function paymentWebhooks(base: string, botId: string): Record<string, string> {
-  return {
-    paystack: webhookUrl(base, "paystack", botId),
-    nowpayments: webhookUrl(base, "nowpayments", botId),
-    btcpay: webhookUrl(base, "btcpay", botId),
-  };
-}
 
-function prices(bot: BotConfig): Record<string, number> {
-  return {
-    one_time: bot.prices.one_time,
-    monthly: bot.prices.monthly,
-    image_vault: bot.prices.image_unlock,
-  };
-}
 
 /** Parse and validate the payment-provider fields shared by create and update. */
 function providerFields(body: Record<string, unknown>): Record<string, string | null | undefined> {
@@ -252,98 +238,48 @@ bots.post("/", async (c) => {
 // ── Read ─────────────────────────────────────────────────────────────────────
 
 bots.get("/", async (c) => {
-  const tenant = c.get("tenant");
-  const { results } = await c.env.DB.prepare(
-    `SELECT b.id, b.group_name, b.group_chat_id, b.bot_username, b.status, b.created_at,
-            b.one_time_price, b.monthly_price, b.image_unlock_price,
-            (SELECT COUNT(*) FROM members m
-              WHERE m.bot_id = b.id AND m.has_access = 1
-                AND (m.access_expires IS NULL OR m.access_expires > ?2)) AS member_count
-     FROM bots b WHERE b.tenant_id = ?1 AND b.status != 'deleted' ORDER BY b.created_at`,
-  )
-    .bind(tenant.id, now())
-    .all<{
-      id: string;
-      group_name: string | null;
-      group_chat_id: number | null;
-      bot_username: string | null;
-      status: string;
-      created_at: number;
-      one_time_price: number | null;
-      monthly_price: number | null;
-      image_unlock_price: number | null;
-      member_count: number;
-    }>();
-
-  // The owner bot's prices and group come from Worker secrets, so resolve it properly.
-  const owner = tenant.id === OWNER_ID ? await loadTenantBot(c.env, OWNER_ID, OWNER_ID) : null;
-
+  const list = await listBots(c.env, c.get("tenant").id);
   return c.json({
-    count: results.length,
-    bots: results.map((b) => ({
+    count: list.length,
+    bots: list.map((b) => ({
       id: b.id,
-      bot_username: b.bot_username ? `@${b.bot_username}` : null,
-      group_name: b.group_name,
-      group_chat_id: owner && b.id === OWNER_ID ? owner.groupChatId : b.group_chat_id,
+      bot_username: b.botUsername,
+      group_name: b.groupName,
+      group_chat_id: b.groupChatId,
       status: b.status,
-      member_count: b.member_count,
-      prices:
-        owner && b.id === OWNER_ID
-          ? prices(owner)
-          : {
-              one_time: b.one_time_price ?? 10,
-              monthly: b.monthly_price ?? 5,
-              image_vault: b.image_unlock_price ?? 20,
-            },
-      created_at: iso(b.created_at),
+      member_count: b.activeMembers,
+      prices: b.prices,
+      created_at: b.createdAt,
     })),
   });
 });
 
 bots.get("/:botId", async (c) => {
-  const tenant = c.get("tenant");
-  const bot = await loadTenantBot(c.env, c.req.param("botId"), tenant.id);
-  const revenue = await c.env.DB.prepare(
-    `SELECT COALESCE(SUM(gross_amount), 0) AS gross, COALESCE(SUM(net_amount), 0) AS net
-     FROM payments WHERE bot_id = ?1 AND status = 'confirmed'`,
-  )
-    .bind(bot.id)
-    .first<{ gross: number; net: number }>();
-  const gross = revenue?.gross ?? 0;
-  const net = revenue?.net ?? 0;
-  const base = baseUrl(c);
-
+  const bot = await loadTenantBot(c.env, c.req.param("botId"), c.get("tenant").id);
+  const d = await botDetail(c.env, bot, baseUrl(c));
   return c.json({
-    id: bot.id,
-    bot_username: bot.username ? `@${bot.username}` : null,
-    group_name: bot.groupName,
-    group_chat_id: bot.groupChatId,
-    status: bot.status,
-    active_members: await countActiveMembers(c.env, bot.id),
+    id: d.id,
+    bot_username: d.botUsername,
+    group_name: d.groupName,
+    group_chat_id: d.groupChatId,
+    status: d.status,
+    active_members: d.activeMembers,
     revenue: {
-      gross: `$${gross.toFixed(2)}`,
-      platform_fee: `$${(gross - net).toFixed(2)}`,
-      net: `$${net.toFixed(2)}`,
+      gross: `$${d.revenue.grossUsd.toFixed(2)}`,
+      platform_fee: `$${d.revenue.platformFeeUsd.toFixed(2)}`,
+      net: `$${d.revenue.netUsd.toFixed(2)}`,
     },
-    prices: prices(bot),
-    currency: bot.currency,
-    fx_rate: bot.fxRate,
-    welcome_title: bot.welcomeTitle,
-    welcome_text: bot.welcomeText,
-    group_description: bot.groupDescription,
-    admin_user_ids: bot.adminIds,
-    payment_providers: availableProviders(bot),
-    // Keys are never returned in full — only enough to recognise which one is in use.
-    credentials: {
-      paystack_secret_key: maskSecret(bot.paystack?.secretKey),
-      nowpayments_api_key: maskSecret(bot.nowpayments?.apiKey),
-      nowpayments_ipn_secret_set: Boolean(bot.nowpayments?.ipnSecret),
-      btcpay_url: bot.btcpay?.url ?? null,
-      btcpay_api_key: maskSecret(bot.btcpay?.apiKey),
-      btcpay_webhook_secret_set: Boolean(bot.btcpay?.webhookSecret),
-    },
-    webhooks: paymentWebhooks(base, bot.id),
-    created_at: iso(bot.createdAt),
+    prices: d.prices,
+    currency: d.currency,
+    fx_rate: d.fxRate,
+    welcome_title: d.welcomeTitle,
+    welcome_text: d.welcomeText,
+    group_description: d.groupDescription,
+    admin_user_ids: d.adminUserIds,
+    payment_providers: d.paymentProviders,
+    credentials: d.credentials,
+    webhooks: d.webhooks,
+    created_at: d.createdAt,
   });
 });
 
@@ -360,15 +296,11 @@ bots.patch("/:botId", async (c) => {
   const tenant = c.get("tenant");
   const bot = await loadTenantBot(c.env, c.req.param("botId"), tenant.id);
   const body = await readJson(c);
-  const set: Record<string, unknown> = {};
+  const update: BotSettingsUpdate = {};
 
-  for (const [field, column] of [
-    ["one_time_price", "one_time_price"],
-    ["monthly_price", "monthly_price"],
-    ["image_unlock_price", "image_unlock_price"],
-  ] as const) {
+  for (const field of ["one_time_price", "monthly_price", "image_unlock_price"] as const) {
     const value = optNumber(body, field, PRICE);
-    if (value !== undefined) set[column] = value;
+    if (value !== undefined) update[field] = value;
   }
   for (const [field, max] of [
     ["welcome_title", 256],
@@ -376,32 +308,29 @@ bots.patch("/:botId", async (c) => {
     ["group_description", 2000],
   ] as const) {
     const value = optString(body, field, max);
-    if (value !== undefined) set[field] = value;
+    if (value !== undefined) update[field] = value;
   }
 
   const currency = optString(body, "currency", 8);
   if (currency) {
     if (!CURRENCY.test(currency.toUpperCase())) throw new HttpError(422, "'currency' must be a 3-letter code.");
-    set.currency = currency.toUpperCase();
+    update.currency = currency.toUpperCase();
   }
   const fxRate = optNumber(body, "fx_rate", { min: 0.000001 });
-  if (fxRate !== undefined) set.fx_rate = fxRate;
+  if (fxRate !== undefined) update.fx_rate = fxRate;
 
   const groupChatId = optNumber(body, "group_chat_id", { integer: true });
-  if (groupChatId !== undefined) set.group_chat_id = groupChatId;
+  if (groupChatId !== undefined) update.group_chat_id = groupChatId;
 
   const adminIds = adminIdsField(body);
-  if (adminIds !== undefined) set.admin_user_ids = adminIds;
+  if (adminIds !== undefined) update.admin_user_ids = adminIds;
 
   const status = optString(body, "status", 16);
   if (status) {
     if (status !== "active" && status !== "paused") {
       throw new HttpError(422, "'status' must be 'active' or 'paused'.");
     }
-    if (bot.status === "expired") {
-      throw new HttpError(403, "This bot stopped when the free trial ended. Upgrade to reactivate it.");
-    }
-    set.status = status;
+    update.status = status;
   }
 
   const providers = providerFields(body);
@@ -409,20 +338,14 @@ bots.patch("/:botId", async (c) => {
   if (sentProviderField && bot.isOwner) {
     throw new HttpError(400, "The owner bot's payment keys are Worker secrets. Change them in the Cloudflare dashboard.");
   }
+  const credentials: Record<string, string | null> = {};
   for (const [field, value] of Object.entries(providers)) {
     const spec = PROVIDER_COLUMNS[field];
     if (!spec || value === undefined) continue;
-    set[spec.column] = value === null ? null : spec.encrypted ? await encrypt(c.env, value) : value;
+    credentials[spec.column] = value === null ? null : spec.encrypted ? await encrypt(c.env, value) : value;
   }
 
-  const names = Object.keys(set);
-  if (names.length === 0) throw new HttpError(400, "Nothing to update.");
-  await c.env.DB.prepare(
-    `UPDATE bots SET ${names.map((n, i) => `${n} = ?${i + 1}`).join(", ")} WHERE id = ?${names.length + 1}`,
-  )
-    .bind(...Object.values(set), bot.id)
-    .run();
-
+  await updateBotSettings(c.env, bot, update, credentials);
   return c.json({ message: "Bot updated.", bot_id: bot.id });
 });
 
@@ -463,42 +386,22 @@ bots.get("/:botId/members", async (c) => {
   const bot = await loadTenantBot(c.env, c.req.param("botId"), c.get("tenant").id);
   const limit = Math.min(Math.max(Number(c.req.query("limit")) || 100, 1), 500);
   const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
-  const { results } = await c.env.DB.prepare(
-    `SELECT * FROM members
-     WHERE bot_id = ?1 AND has_access = 1 AND (access_expires IS NULL OR access_expires > ?2)
-     ORDER BY joined_at DESC, id LIMIT ?3 OFFSET ?4`,
-  )
-    .bind(bot.id, now(), limit, offset)
-    .all<MemberRow>();
-  return c.json({
-    count: results.length,
-    total: await countActiveMembers(c.env, bot.id),
-    members: results.map((m) => ({
-      telegram_id: m.telegram_id,
-      username: m.username,
-      first_name: m.first_name,
-      access_type: m.access_type,
-      access_expires: iso(m.access_expires),
-      images_unlocked: m.images_unlocked === 1,
-      joined_at: iso(m.joined_at),
-    })),
-  });
+  const page = await listMembers(c.env, bot.id, { limit, offset, search: c.req.query("search") });
+  return c.json({ count: page.members.length, total: page.total, members: page.members });
 });
 
 bots.post("/:botId/members/:telegramId/grant", async (c) => {
   const bot = await loadTenantBot(c.env, c.req.param("botId"), c.get("tenant").id);
   const telegramId = telegramIdParam(c.req.param("telegramId"));
-  await memberGrantStatement(c.env, bot.id, telegramId, "manual_grant").run();
-  c.executionCtx.waitUntil(deliverAccess(c.env, bot, telegramId, "manual_grant"));
+  await grantAccess(c.env, bot, telegramId, (p) => c.executionCtx.waitUntil(p));
   return c.json({ message: `Access granted to ${telegramId}` });
 });
 
 bots.post("/:botId/members/:telegramId/revoke", async (c) => {
   const bot = await loadTenantBot(c.env, c.req.param("botId"), c.get("tenant").id);
   const telegramId = telegramIdParam(c.req.param("telegramId"));
-  if (!(await revokeMemberAccess(c.env, bot.id, telegramId))) {
+  if (!(await revokeAccess(c.env, bot, telegramId, (p) => c.executionCtx.waitUntil(p)))) {
     throw new HttpError(404, "Member not found.");
   }
-  c.executionCtx.waitUntil(removeAccess(bot, telegramId));
   return c.json({ message: `Access revoked for ${telegramId}` });
 });

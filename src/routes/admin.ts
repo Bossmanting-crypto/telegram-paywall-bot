@@ -2,11 +2,18 @@
 
 import { Hono } from "hono";
 import { checkBot, summarise, telegramWebhookUrl } from "../checks";
-import { iso, loadBot, now, type Tier } from "../db";
-import { FREE_TRIAL_DAYS, OWNER_ID, TIER_CUT } from "../env";
+import { loadBot, type Tier } from "../db";
+import { OWNER_ID } from "../env";
 import { encryptionConfigured } from "../lib/crypto";
-import { HttpError, baseUrl, optNumber, optString, readJson, round2, type AppContext } from "../lib/http";
+import { HttpError, baseUrl, optNumber, optString, readJson, type AppContext } from "../lib/http";
 import { webhookUrl } from "../payments";
+import {
+  listCreators,
+  platformOverview,
+  setCreatorActive,
+  setCreatorPaystackSubaccount,
+  setCreatorPlan,
+} from "../services";
 import { ALLOWED_UPDATES, TelegramError, looksLikeBotToken, tg } from "../telegram";
 import { ADMIN_PAGE } from "./admin-page";
 import { requireAdmin } from "./auth";
@@ -128,136 +135,55 @@ admin.get("/check-credentials", async (c) => {
 
 /** Platform-wide numbers: what the platform itself has earned. */
 admin.get("/overview", async (c) => {
-  const since = now() - 30 * 86400;
-  const money = await c.env.DB.prepare(
-    `SELECT COUNT(*) AS n,
-            COALESCE(SUM(gross_amount), 0) AS gross,
-            COALESCE(SUM(platform_fee), 0) AS fees,
-            COALESCE(SUM(CASE WHEN confirmed_at >= ?1 THEN gross_amount ELSE 0 END), 0) AS gross30,
-            COALESCE(SUM(CASE WHEN confirmed_at >= ?1 THEN platform_fee ELSE 0 END), 0) AS fees30
-     FROM payments WHERE status = 'confirmed'`,
-  )
-    .bind(since)
-    .first<{ n: number; gross: number; fees: number; gross30: number; fees30: number }>();
-  const own = await c.env.DB.prepare(
-    `SELECT COALESCE(SUM(gross_amount), 0) AS gross FROM payments WHERE status = 'confirmed' AND tenant_id = ?1`,
-  )
-    .bind(OWNER_ID)
-    .first<{ gross: number }>();
-  const counts = await c.env.DB.prepare(
-    `SELECT
-       (SELECT COUNT(*) FROM tenants WHERE id != ?1) AS tenants,
-       (SELECT COUNT(*) FROM tenants WHERE id != ?1 AND tier = 'free') AS free_tenants,
-       (SELECT COUNT(*) FROM bots WHERE status = 'active') AS active_bots,
-       (SELECT COUNT(*) FROM members WHERE has_access = 1 AND (access_expires IS NULL OR access_expires > ?2)) AS members`,
-  )
-    .bind(OWNER_ID, now())
-    .first<{ tenants: number; free_tenants: number; active_bots: number; members: number }>();
-
+  const o = await platformOverview(c.env);
   return c.json({
-    creators: { total: counts?.tenants ?? 0, on_free_trial: counts?.free_tenants ?? 0 },
-    active_bots: counts?.active_bots ?? 0,
-    active_members: counts?.members ?? 0,
+    creators: { total: o.creators.total, on_free_trial: o.creators.onFreeTrial },
+    active_bots: o.activeBots,
+    active_members: o.activeMembers,
     all_time: {
-      transactions: money?.n ?? 0,
-      processed_usd: round2(money?.gross ?? 0),
-      platform_fees_usd: round2(money?.fees ?? 0),
-      own_bot_sales_usd: round2(own?.gross ?? 0),
+      transactions: o.allTime.transactions,
+      processed_usd: o.allTime.processedUsd,
+      platform_fees_usd: o.allTime.platformFeesUsd,
+      own_bot_sales_usd: o.allTime.ownBotSalesUsd,
     },
     last_30_days: {
-      processed_usd: round2(money?.gross30 ?? 0),
-      platform_fees_usd: round2(money?.fees30 ?? 0),
+      processed_usd: o.last30Days.processedUsd,
+      platform_fees_usd: o.last30Days.platformFeesUsd,
     },
   });
 });
 
 admin.get("/tenants", async (c) => {
-  const { results } = await c.env.DB.prepare(
-    `SELECT t.id, t.email, t.name, t.tier, t.platform_cut, t.is_active, t.trial_ends_at, t.created_at,
-            t.paystack_subaccount_code,
-            (SELECT COUNT(*) FROM bots b WHERE b.tenant_id = t.id AND b.status != 'deleted') AS bots,
-            (SELECT COALESCE(SUM(p.gross_amount), 0) FROM payments p WHERE p.tenant_id = t.id AND p.status = 'confirmed') AS gross,
-            (SELECT COALESCE(SUM(p.platform_fee), 0) FROM payments p WHERE p.tenant_id = t.id AND p.status = 'confirmed') AS fees
-     FROM tenants t WHERE t.id != ?1 ORDER BY t.created_at DESC LIMIT 500`,
-  )
-    .bind(OWNER_ID)
-    .all<{
-      id: string;
-      email: string;
-      name: string;
-      tier: string;
-      platform_cut: number;
-      is_active: number;
-      trial_ends_at: number | null;
-      created_at: number;
-      paystack_subaccount_code: string | null;
-      bots: number;
-      gross: number;
-      fees: number;
-    }>();
-  return c.json({
-    count: results.length,
-    tenants: results.map((t) => ({
-      id: t.id,
-      email: t.email,
-      name: t.name,
-      tier: t.tier,
-      platform_cut: t.platform_cut,
-      active: t.is_active === 1,
-      trial_ends: iso(t.trial_ends_at),
-      bots: t.bots,
-      processed_usd: round2(t.gross),
-      platform_fees_usd: round2(t.fees),
-      paystack_subaccount_code: t.paystack_subaccount_code,
-      created_at: iso(t.created_at),
-    })),
-  });
+  const limit = Math.min(Math.max(Number(c.req.query("limit")) || 500, 1), 500);
+  const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
+  const page = await listCreators(c.env, { limit, offset });
+  return c.json({ count: page.creators.length, total: page.total, tenants: page.creators });
 });
-
-async function requireTenantId(c: { env: AppContext["Bindings"] }, id: string): Promise<void> {
-  if (id === OWNER_ID) throw new HttpError(400, "The owner account cannot be changed here.");
-  const found = await c.env.DB.prepare("SELECT id FROM tenants WHERE id = ?1").bind(id).first();
-  if (!found) throw new HttpError(404, "Tenant not found.");
-}
 
 /** Change a creator's plan once they have paid for it. */
 admin.post("/tenants/:id/tier", async (c) => {
   const id = c.req.param("id");
-  await requireTenantId(c, id);
   const body = await readJson(c);
   const tier = optString(body, "tier", 16) as Tier | null | undefined;
   if (tier !== "free" && tier !== "starter" && tier !== "whitelabel") {
     throw new HttpError(400, "Invalid tier. Choose 'free', 'starter' or 'whitelabel'.");
   }
-  const cut = optNumber(body, "platform_cut", { min: 0, max: 1 }) ?? TIER_CUT[tier] ?? 0;
-  const trialEnds = tier === "free" ? now() + FREE_TRIAL_DAYS * 86400 : null;
-
-  await c.env.DB.batch([
-    c.env.DB.prepare("UPDATE tenants SET tier = ?1, platform_cut = ?2, trial_ends_at = ?3 WHERE id = ?4").bind(
-      tier,
-      cut,
-      trialEnds,
-      id,
-    ),
-    // Bots that stopped when a trial ran out come back on a paid plan.
-    c.env.DB.prepare("UPDATE bots SET status = 'active' WHERE tenant_id = ?1 AND status = 'expired'").bind(id),
-  ]);
+  const result = await setCreatorPlan(c.env, id, tier, optNumber(body, "platform_cut", { min: 0, max: 1 }));
   return c.json({
-    message: `Tenant is now on '${tier}'. Platform cut is ${Math.round(cut * 100)}%.`,
+    message: `Tenant is now on '${tier}'. Platform cut is ${Math.round(result.platformCut * 100)}%.`,
     tenant_id: id,
     tier,
-    platform_cut: cut,
-    trial_ends: iso(trialEnds),
+    platform_cut: result.platformCut,
+    trial_ends: result.trialEndsAt,
   });
 });
 
 /** Suspend or restore a creator. Suspended creators' bots stop selling. */
 admin.post("/tenants/:id/active", async (c) => {
   const id = c.req.param("id");
-  await requireTenantId(c, id);
   const body = await readJson(c);
   if (typeof body.active !== "boolean") throw new HttpError(422, "'active' must be true or false.");
-  await c.env.DB.prepare("UPDATE tenants SET is_active = ?1 WHERE id = ?2").bind(body.active ? 1 : 0, id).run();
+  await setCreatorActive(c.env, id, body.active);
   return c.json({ message: body.active ? "Tenant restored." : "Tenant suspended.", tenant_id: id });
 });
 
@@ -268,14 +194,13 @@ admin.post("/tenants/:id/active", async (c) => {
  */
 admin.post("/tenants/:id/paystack-subaccount", async (c) => {
   const id = c.req.param("id");
-  await requireTenantId(c, id);
   const body = await readJson(c);
   const code = optString(body, "code", 128);
   if (code === undefined) throw new HttpError(422, "'code' is required (send null to remove it).");
   if (code !== null && !/^ACCT_[A-Za-z0-9]+$/.test(code)) {
     throw new HttpError(422, "'code' must be a Paystack subaccount code such as ACCT_xxxxxxxx.");
   }
-  await c.env.DB.prepare("UPDATE tenants SET paystack_subaccount_code = ?1 WHERE id = ?2").bind(code, id).run();
+  await setCreatorPaystackSubaccount(c.env, id, code);
   return c.json({
     message: code ? "Paystack split enabled for this tenant." : "Paystack split removed.",
     tenant_id: id,

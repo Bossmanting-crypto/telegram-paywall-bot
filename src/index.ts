@@ -3,6 +3,8 @@
  *
  *   /api/v1/*            creator API (x-api-key)
  *   /admin, /admin/*     platform owner (x-admin-key)
+ *   /mcp                 MCP server for Claude and other AI clients (OAuth)
+ *   /authorize, /oauth/*, /.well-known/oauth-*   MCP sign-in
  *   /telegram/{bot_id}   Telegram sends bot updates here
  *   /webhooks/{provider}/{bot_id}   payment confirmations
  *   scheduled()          every minute: subscription expiry, broadcasts
@@ -12,10 +14,18 @@ import { app } from "./app";
 import { runCron } from "./cron";
 import type { AppEnv } from "./env";
 import { logError } from "./lib/http";
+import { isOAuthRoute, oauthProvider } from "./mcp/oauth";
 import { ensureReady } from "./schema";
 
 export default {
-  fetch: app.fetch,
+  fetch(request, env, ctx) {
+    // Only MCP and its sign-in go through the OAuth layer; the bot, the API
+    // and the payment webhooks are served exactly as before.
+    if (isOAuthRoute(new URL(request.url).pathname)) {
+      return oauthProvider(env, request).fetch(request, env, ctx);
+    }
+    return app.fetch(request, env, ctx);
+  },
 
   async scheduled(controller, env, _ctx) {
     try {

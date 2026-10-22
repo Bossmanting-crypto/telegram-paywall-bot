@@ -1,10 +1,11 @@
 /** /api/v1/tenants — signup, profile, API key rotation. */
 
 import { Hono } from "hono";
-import { iso, now, type TenantRow } from "../db";
+import { iso, now } from "../db";
 import { FREE_TRIAL_DAYS, OWNER_ID, TIER_CUT } from "../env";
 import { newApiKey, newId, sha256Hex } from "../lib/crypto";
 import { HttpError, readJson, reqString, type AppContext } from "../lib/http";
+import { accountSummary } from "../services";
 import { requireTenant } from "./auth";
 
 export const tenants = new Hono<AppContext>();
@@ -53,33 +54,19 @@ tenants.post("/signup", async (c) => {
 });
 
 tenants.get("/me", requireTenant, async (c) => {
-  const t: TenantRow = c.get("tenant");
-  const bots = await c.env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM bots WHERE tenant_id = ?1 AND status != 'deleted'",
-  )
-    .bind(t.id)
-    .first<{ n: number }>();
-  const revenue = await c.env.DB.prepare(
-    `SELECT COALESCE(SUM(gross_amount), 0) AS gross, COALESCE(SUM(platform_fee), 0) AS fees
-     FROM payments WHERE tenant_id = ?1 AND status = 'confirmed'`,
-  )
-    .bind(t.id)
-    .first<{ gross: number; fees: number }>();
-  const gross = revenue?.gross ?? 0;
-  const fees = revenue?.fees ?? 0;
-
+  const a = await accountSummary(c.env, c.get("tenant"));
   return c.json({
-    id: t.id,
-    email: t.email,
-    name: t.name,
-    tier: t.tier,
-    platform_cut: percent(t.platform_cut),
-    api_key_hint: `${t.api_key_prefix}…`,
-    bots: bots?.n ?? 0,
-    trial_ends: iso(t.trial_ends_at),
-    total_gross: `$${gross.toFixed(2)}`,
-    platform_fees: `$${fees.toFixed(2)}`,
-    net_earned: `$${(gross - fees).toFixed(2)}`,
+    id: a.id,
+    email: a.email,
+    name: a.name,
+    tier: a.tier,
+    platform_cut: percent(a.platformCut),
+    api_key_hint: a.apiKeyHint,
+    bots: a.bots,
+    trial_ends: a.trialEndsAt,
+    total_gross: `$${a.grossUsd.toFixed(2)}`,
+    platform_fees: `$${a.feesUsd.toFixed(2)}`,
+    net_earned: `$${a.netUsd.toFixed(2)}`,
   });
 });
 

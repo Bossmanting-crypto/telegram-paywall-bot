@@ -24,6 +24,7 @@ import {
   PROVIDERS,
 } from "../db";
 import { newId } from "../lib/crypto";
+import { queueBroadcast } from "../services";
 import { HttpError, logError, money } from "../lib/http";
 import {
   ACCESS_LABEL,
@@ -408,18 +409,9 @@ async function adminCommand(
         await reply("Usage: /broadcast &lt;message&gt;");
         return true;
       }
-      const recipients = await env.DB.prepare(
-        "SELECT COUNT(*) AS n FROM members WHERE bot_id = ?1 AND has_access = 1",
-      )
-        .bind(bot.id)
-        .first<{ n: number }>();
-      await env.DB.prepare(
-        `INSERT INTO broadcasts (id, bot_id, text, requested_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5)`,
-      )
-        .bind(newId(), bot.id, command.args.slice(0, 4000), from.id, now())
-        .run();
+      const recipients = await queueBroadcast(env, bot.id, command.args, from.id);
       await reply(
-        `📢 Broadcast queued for <b>${recipients?.n ?? 0}</b> member(s). Delivery starts within a minute; I'll confirm when it's done.`,
+        `📢 Broadcast queued for <b>${recipients}</b> member(s). Delivery starts within a minute; I'll confirm when it's done.`,
       );
       return true;
     }

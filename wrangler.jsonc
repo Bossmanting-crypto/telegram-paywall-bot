@@ -3,7 +3,7 @@
   "name": "telegram-paywall-bot",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-06",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
 
   // The D1 database created in the Cloudflare dashboard (Storage & Databases →
   // D1 SQL Database). The ID is not a secret. To move to a different database,
@@ -15,6 +15,12 @@
       "database_name": "telegram-paywall-bot",
       "database_id": "8d5bbdd2-a97d-40e8-a448-1d061a19f54c"
     }
+  ],
+
+  // Sign-in records for the MCP server (OAuth clients, grants and tokens, all
+  // stored hashed or encrypted). Created automatically on the first deploy.
+  "kv_namespaces": [
+    { "binding": "OAUTH_KV" }
   ],
 
   // Runs every minute: expires monthly subscriptions, ends free trials,

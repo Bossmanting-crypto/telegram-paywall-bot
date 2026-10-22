@@ -1,9 +1,10 @@
 /** /api/v1/payments — create payment links and look up orders. */
 
 import { Hono } from "hono";
-import { ACCESS_TYPES, PROVIDERS, iso, loadTenantBot, type AccessType, type PaymentRow, type Provider } from "../db";
+import { ACCESS_TYPES, PROVIDERS, loadTenantBot, type AccessType, type Provider } from "../db";
 import { HttpError, baseUrl, optNumber, optString, readJson, reqString, type AppContext } from "../lib/http";
 import { createPayment } from "../payments";
+import { findTenantPayment, paymentView } from "../services";
 import { requireTenant } from "./auth";
 
 export const payments = new Hono<AppContext>();
@@ -54,22 +55,8 @@ payments.post("/generate-link", async (c) => {
 });
 
 payments.get("/:orderId", async (c) => {
-  const p = await c.env.DB.prepare("SELECT * FROM payments WHERE provider_ref = ?1 AND tenant_id = ?2")
-    .bind(c.req.param("orderId"), c.get("tenant").id)
-    .first<PaymentRow>();
+  const p = await findTenantPayment(c.env, c.get("tenant").id, c.req.param("orderId"));
   if (!p) throw new HttpError(404, "Payment not found.");
-  return c.json({
-    order_id: p.provider_ref,
-    bot_id: p.bot_id,
-    telegram_id: p.telegram_id,
-    status: p.status,
-    provider: p.provider,
-    access_type: p.access_type,
-    gross: p.gross_amount,
-    platform_fee: p.platform_fee,
-    net: p.net_amount,
-    currency: p.currency,
-    created_at: iso(p.created_at),
-    confirmed_at: iso(p.confirmed_at),
-  });
+  const { id: _id, ...view } = paymentView(p);
+  return c.json(view);
 });
