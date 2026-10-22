@@ -15,7 +15,10 @@ import {
   setCreatorActive,
   setCreatorPaystackSubaccount,
   setCreatorPlan,
+  setAdultLabel,
+  adultNotes,
 } from "../services";
+import { alertCreator } from "../alerts";
 import { ALLOWED_UPDATES, TelegramError, looksLikeBotToken, tg } from "../telegram";
 import { ensureJoinLink } from "../group";
 import { ADMIN_PAGE } from "./admin-page";
@@ -185,6 +188,28 @@ admin.post("/tenants/:id/tier", async (c) => {
     platform_cut: result.platformCut,
     trial_ends: result.trialEndsAt,
   });
+});
+
+/**
+ * Label any bot adults-only (Paystack off, crypto on). With "lock", the
+ * creator can't remove the label. The creator is told through their bot.
+ */
+admin.post("/bots/:botId/adult", async (c) => {
+  const body = await readJson(c);
+  if (typeof body.adult !== "boolean") throw new HttpError(422, "'adult' must be true or false.");
+  if (body.lock !== undefined && typeof body.lock !== "boolean") throw new HttpError(422, "'lock' must be true or false.");
+  const bot = await setAdultLabel(c.env, c.req.param("botId"), body.adult, body.lock === true);
+  if (!bot.isOwner) {
+    await alertCreator(
+      c.env,
+      bot,
+      "adult-label",
+      body.adult
+        ? "The platform labelled your group adults-only, so buyers now pay with crypto only (Paystack doesn't support adult content)."
+        : "The adults-only label was removed from your group, so Paystack is available again.",
+    ).catch(() => undefined);
+  }
+  return c.json({ bot_id: bot.id, adult: bot.adult, adult_locked: bot.adultLocked, notes: adultNotes(bot, bot.adult) });
 });
 
 /** Give a creator a new API key, e.g. when they've lost theirs. Shown once. */

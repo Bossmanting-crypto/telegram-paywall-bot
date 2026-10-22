@@ -76,6 +76,8 @@ export interface BotRow {
   weekly_price: number | null;
   price_currency: string;
   free_pass_hours: number;
+  adult: number;
+  adult_locked: number;
   currency: string | null;
   fx_rate: number | null;
   welcome_title: string | null;
@@ -166,6 +168,10 @@ export interface BotConfig {
   fxRate: number;
   /** Free group pass for newcomers, in hours (0 = off). */
   freePassHours: number;
+  /** Adults-only group: only payment methods that allow adult content (crypto). */
+  adult: boolean;
+  /** The platform owner set the label; the creator can't remove it. */
+  adultLocked: boolean;
   paystackChannels: string[] | null;
   welcomeTitle: string;
   welcomeText: string;
@@ -292,6 +298,8 @@ async function resolveBot(env: AppEnv, row: BotJoinRow): Promise<BotConfig> {
     lastNoticeMessageId: row.last_notice_message_id,
     joinMode: (row.join_mode === "approve" ? "approve" : "mute") as JoinMode,
     freePassHours: Math.max(0, row.free_pass_hours ?? 0),
+    adult: row.adult === 1,
+    adultLocked: row.adult_locked === 1,
     joinLink: row.join_link ?? null,
     coins: {
       enabled: row.coins_enabled === 1,

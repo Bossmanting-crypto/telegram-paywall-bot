@@ -45,12 +45,23 @@ export const ACCESS_LABEL: Record<AccessType, string> = {
  * offered when its webhook secret is set too — without it a payment could
  * never be verified, so the buyer would pay and stay locked out.
  */
-export function availableProviders(bot: BotConfig): Provider[] {
+/** Payment providers Paystack's rules keep away from adults-only groups. */
+export const ADULT_BLOCKED: ReadonlySet<Provider> = new Set(["paystack"]);
+
+export function availableProviders(bot: Pick<BotConfig, "paystack" | "nowpayments" | "btcpay"> & { adult?: boolean }): Provider[] {
   const list: Provider[] = [];
-  if (bot.paystack) list.push("paystack");
+  if (bot.paystack && !bot.adult) list.push("paystack");
   if (bot.nowpayments?.ipnSecret) list.push("nowpayments");
   if (bot.btcpay?.webhookSecret) list.push("btcpay");
   return list;
+}
+
+function assertProvider(bot: BotConfig, provider: Provider): void {
+  if (availableProviders(bot).includes(provider)) return;
+  if (bot.adult && ADULT_BLOCKED.has(provider)) {
+    throw new HttpError(400, `This group is labelled adults-only, so '${provider}' is off. Use crypto (NOWPayments or BTCPay).`);
+  }
+  throw new HttpError(400, `Provider '${provider}' not configured for this bot.`);
 }
 
 export function webhookUrl(baseUrl: string, provider: Provider, botId: string): string {
@@ -86,9 +97,7 @@ export async function createPayment(
   if (!(amount > 0)) {
     throw new HttpError(400, `'${opts.accessType}' is not for sale on this bot.`);
   }
-  if (!availableProviders(bot).includes(opts.provider)) {
-    throw new HttpError(400, `Provider '${opts.provider}' not configured for this bot.`);
-  }
+  assertProvider(bot, opts.provider);
   if (opts.accessType === "image_unlock" && (await countVaultImages(env, bot.id)) === 0) {
     throw new HttpError(400, "The image vault is empty, so there is nothing to sell yet.");
   }
@@ -123,9 +132,7 @@ export async function createCoinPayment(
   if (!bot.coins.enabled) throw new HttpError(400, "Coins are not turned on for this bot.");
   const pack = bot.coins.packs[opts.packIndex];
   if (!pack) throw new HttpError(400, "That coin pack doesn't exist.");
-  if (!availableProviders(bot).includes(opts.provider)) {
-    throw new HttpError(400, `Provider '${opts.provider}' not configured for this bot.`);
-  }
+  assertProvider(bot, opts.provider);
   const created = await startPayment(env, bot, {
     telegramId: opts.telegramId,
     kind: "coin_pack",

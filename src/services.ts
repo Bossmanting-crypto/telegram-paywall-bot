@@ -9,6 +9,7 @@
 import {
   countActiveMembers,
   iso,
+  loadBot,
   loadTenantBot,
   memberGrantStatement,
   now,
@@ -221,6 +222,7 @@ export interface BotSummary {
   status: string;
   activeMembers: number;
   prices: BotPrices;
+  adult: boolean;
   createdAt: string | null;
 }
 
@@ -228,7 +230,7 @@ export async function listBots(env: AppEnv, tenantId: string): Promise<BotSummar
   const { results } = await env.DB.prepare(
     `SELECT b.id, b.group_name, b.group_chat_id, b.bot_username, b.status, b.created_at,
             b.one_time_price, b.monthly_price, b.image_unlock_price, b.daily_price, b.weekly_price,
-            b.price_currency, b.currency,
+            b.price_currency, b.currency, b.adult,
             (SELECT COUNT(*) FROM members m
               WHERE m.bot_id = b.id AND m.has_access = 1
                 AND (m.access_expires IS NULL OR m.access_expires > ?2)) AS member_count
@@ -249,6 +251,7 @@ export async function listBots(env: AppEnv, tenantId: string): Promise<BotSummar
       weekly_price: number | null;
       price_currency: string | null;
       currency: string | null;
+      adult: number;
       member_count: number;
     }>();
 
@@ -274,6 +277,7 @@ export async function listBots(env: AppEnv, tenantId: string): Promise<BotSummar
             one_time: b.one_time_price ?? 10,
             image_vault: b.image_unlock_price ?? 20,
           },
+      adult: b.adult === 1,
       createdAt: iso(b.created_at),
     };
   });
@@ -298,6 +302,8 @@ export interface BotDetail {
   joinMode: "mute" | "approve";
   joinLink: string | null;
   freePassHours: number;
+  adult: boolean;
+  adultLocked: boolean;
   coins: { enabled: boolean; freeCoins: number; unlockCost: number; packs: Array<{ coins: number; price: number }> };
   contentItems: number;
   credentials: {
@@ -347,6 +353,8 @@ export async function botDetail(env: AppEnv, bot: BotConfig, base: string): Prom
     paymentProviders: availableProviders(bot),
     joinMode: bot.joinMode,
     freePassHours: bot.freePassHours,
+    adult: bot.adult,
+    adultLocked: bot.adultLocked,
     joinLink: bot.joinLink,
     coins: {
       enabled: bot.coins.enabled,
@@ -379,6 +387,8 @@ export interface BotSettingsUpdate {
   /** "USD" or the bot's Paystack currency. */
   price_currency?: string;
   free_pass_hours?: number;
+  adult?: 0 | 1;
+  adult_locked?: 0 | 1;
   welcome_title?: string | null;
   welcome_text?: string | null;
   group_description?: string | null;
@@ -443,6 +453,48 @@ export async function updateBotSettings(
     .bind(...Object.values(set), bot.id)
     .run();
   return names;
+}
+
+// ── Adults-only label ────────────────────────────────────────────────────────
+
+/** What the label means, for the dashboard, API errors and guides. */
+export const ADULT_LABEL_NOTE =
+  "Adults-only groups take crypto (NOWPayments or BTCPay) only, because Paystack doesn't support adult content. " +
+  "Only legal content of consenting adults; nothing involving minors and no violence.";
+
+/** Validate a creator's change to the adults-only label. */
+export function adultSetting(bot: BotConfig, value: unknown): BotSettingsUpdate {
+  if (value === undefined) return {};
+  if (typeof value !== "boolean") throw new HttpError(422, "'adult' must be true or false.");
+  if (!value && bot.adultLocked) {
+    throw new HttpError(403, "The platform owner labelled this group adults-only. Contact them to change it.");
+  }
+  return { adult: value ? 1 : 0 };
+}
+
+/** A short note after labelling, when the bot has no way left to take payments. */
+export function adultNotes(bot: BotConfig, adult: boolean): string[] {
+  if (!adult) return [];
+  const crypto = Boolean(bot.nowpayments?.ipnSecret || bot.btcpay?.webhookSecret);
+  return crypto
+    ? ["Labelled adults-only: Paystack is off for this group, crypto stays on."]
+    : ["Labelled adults-only: Paystack is off for this group. Add NOWPayments or BTCPay keys so buyers can pay."];
+}
+
+/** Whether any of a creator's groups is labelled adults-only. */
+export async function tenantHasAdult(env: AppEnv, tenantId: string): Promise<boolean> {
+  const row = await env.DB.prepare("SELECT 1 AS x FROM bots WHERE tenant_id = ?1 AND adult = 1 LIMIT 1").bind(tenantId).first();
+  return row !== null;
+}
+
+/** Owner: label (and optionally lock) any bot. Tells the creator through their bot. */
+export async function setAdultLabel(env: AppEnv, botId: string, adult: boolean, lock: boolean): Promise<BotConfig> {
+  const bot = await loadBot(env, botId);
+  if (!bot) throw new HttpError(404, "Bot not found.");
+  await env.DB.prepare("UPDATE bots SET adult = ?1, adult_locked = ?2 WHERE id = ?3")
+    .bind(adult ? 1 : 0, adult && lock ? 1 : 0, botId)
+    .run();
+  return { ...bot, adult, adultLocked: adult && lock };
 }
 
 // ── Coins and join approval ──────────────────────────────────────────────────
@@ -734,6 +786,7 @@ export interface CreatorView {
   active: boolean;
   trial_ends: string | null;
   bots: number;
+  bot_list: Array<{ id: string; username: string | null; group: string | null; adult: boolean; locked: boolean }>;
   processed_usd: number;
   platform_fees_usd: number;
   paystack_subaccount_code: string | null;
@@ -754,6 +807,9 @@ export async function listCreators(
       `SELECT t.id, t.email, t.name, t.tier, t.platform_cut, t.is_active, t.trial_ends_at, t.created_at,
               t.paystack_subaccount_code,
               (SELECT COUNT(*) FROM bots b WHERE b.tenant_id = t.id AND b.status != 'deleted') AS bots,
+              (SELECT json_group_array(json_object('id', b.id, 'username', b.bot_username, 'group', b.group_name,
+                                                   'adult', b.adult, 'locked', b.adult_locked))
+                 FROM bots b WHERE b.tenant_id = t.id AND b.status != 'deleted') AS bot_list,
               (SELECT COALESCE(SUM(p.gross_amount), 0) FROM payments p WHERE p.tenant_id = t.id AND p.status = 'confirmed') AS gross,
               (SELECT COALESCE(SUM(p.platform_fee), 0) FROM payments p WHERE p.tenant_id = t.id AND p.status = 'confirmed') AS fees,
               (SELECT COALESCE(SUM(p.platform_fee), 0) FROM payments p WHERE p.tenant_id = t.id AND p.status = 'confirmed'
@@ -774,6 +830,7 @@ export async function listCreators(
     created_at: number;
     paystack_subaccount_code: string | null;
     bots: number;
+    bot_list: string | null;
     gross: number;
     fees: number;
     fees_due: number;
@@ -794,6 +851,7 @@ export async function listCreators(
       active: t.is_active === 1,
       trial_ends: iso(t.trial_ends_at),
       bots: t.bots,
+      bot_list: parseBotList(t.bot_list),
       processed_usd: round2(t.gross),
       platform_fees_usd: round2(t.fees),
       paystack_subaccount_code: t.paystack_subaccount_code,
@@ -804,6 +862,15 @@ export async function listCreators(
       created_at: iso(t.created_at),
     })),
   };
+}
+
+function parseBotList(value: string | null): Array<{ id: string; username: string | null; group: string | null; adult: boolean; locked: boolean }> {
+  try {
+    const list = JSON.parse(value ?? "[]") as Array<{ id: string; username: string | null; group: string | null; adult: number; locked: number }>;
+    return list.map((b) => ({ id: b.id, username: b.username, group: b.group, adult: b.adult === 1, locked: b.locked === 1 }));
+  } catch {
+    return [];
+  }
 }
 
 /** Give a creator a new API key (the old one stops working at once). Returns the new key. */

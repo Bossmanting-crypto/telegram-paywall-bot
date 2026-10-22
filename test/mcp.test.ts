@@ -427,6 +427,11 @@ describe.each<Mode>(["legacy", "modern"])("MCP tools over the %s protocol", (mod
     expect(detail.body).toMatchObject({ status: "paused", welcome_title: "Gold Club" });
     expect(detail.body.prices.monthly).toBe(8);
 
+    const label = await client.callTool({ name: "paywall_update_bot", arguments: { adult: true } });
+    expect(label.isError).toBeFalsy();
+    expect(textOf(label)).toContain("Paystack is off");
+    expect((await call("GET", `/api/v1/bots/${bot.id}`, { headers: t.headers })).body.adult).toBe(true);
+
     const empty = await client.callTool({ name: "paywall_update_bot", arguments: {} });
     expect(empty.isError).toBe(true);
     expect(textOf(empty)).toContain("Nothing to change");

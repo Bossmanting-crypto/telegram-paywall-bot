@@ -158,6 +158,14 @@ No plan has limits on bots or members, and none expires.
 
 The rate applies to group plans (daily, weekly, monthly, lifetime) and pay-per-post (coins, Image Vault), and is fixed on each payment when it's created. A custom `platform_cut` you set for a creator overrides the ladder. The ladder and the planned rates for escrow trades (half) and hiring workers or agents (+3 points) live in `src/env.ts` (`VOLUME_LADDER`, `OFFERING_RATE`).
 
+**Adult content.** A creator labels a group adults-only (`"adult": true`, or Content label in the dashboard). Paystack doesn't support adult content, so a labelled group only offers crypto (NOWPayments, BTCPay), and that creator pays platform fees in crypto too, so adult revenue never touches a Paystack account. Members see no extra steps. The owner can label any bot and lock it so the creator can't remove it:
+
+```bash
+curl -X POST https://<worker>/admin/bots/<bot_id>/adult \
+  -H "x-admin-key: <ADMIN_API_KEY>" -H "content-type: application/json" \
+  -d '{"adult": true, "lock": true}'
+```
+
 Bots can also offer newcomers a **free pass** (`free_pass_hours`, 1–720): they get in free once, the bot warns them before it ends, removes them if they haven't paid, and follows up once a day later with the plans and a one-tap pay button.
 
 Creators cannot change their own plan. After they pay you, set it yourself:

@@ -17,6 +17,8 @@ import {
 import { availableProviders } from "../payments";
 import { isAcceptableServerUrl } from "../providers/btcpay";
 import {
+  adultNotes,
+  adultSetting,
   applyJoinMode,
   botDetail,
   botPrices,
@@ -135,6 +137,8 @@ bots.post("/", async (c) => {
   }
   const providers = providerFields(body);
   const adminIds = adminIdsField(body);
+  if (body.adult !== undefined && typeof body.adult !== "boolean") throw new HttpError(422, "'adult' must be true or false.");
+  const adult = body.adult === true;
 
   // Ask Telegram who this token belongs to: proves it is real and working.
   let me: { id: number; username?: string };
@@ -171,6 +175,7 @@ bots.post("/", async (c) => {
     welcome_text: optString(body, "welcome_text", 2000) ?? null,
     group_description: optString(body, "group_description", 2000) ?? null,
     admin_user_ids: adminIds ?? null,
+    adult: adult ? 1 : 0,
     created_at: now(),
   };
   for (const [field, value] of Object.entries(providers)) {
@@ -216,6 +221,7 @@ bots.post("/", async (c) => {
   if (bot.btcpay && !bot.btcpay.webhookSecret) {
     notes.push("BTCPay is hidden from buyers until you also send 'btcpay_webhook_secret'.");
   }
+  if (adult) notes.push(...adultNotes(bot, true));
   if (offered.length === 0) notes.push("No payment provider is ready yet, so buyers cannot pay.");
 
   return c.json({
@@ -249,6 +255,7 @@ bots.get("/", async (c) => {
       status: b.status,
       member_count: b.activeMembers,
       prices: b.prices,
+      adult: b.adult,
       created_at: b.createdAt,
     })),
   });
@@ -280,6 +287,8 @@ bots.get("/:botId", async (c) => {
     join_mode: d.joinMode,
     join_link: d.joinLink,
     free_pass_hours: d.freePassHours,
+    adult: d.adult,
+    adult_locked: d.adultLocked,
     coins: {
       enabled: d.coins.enabled,
       free_coins: d.coins.freeCoins,
@@ -363,6 +372,7 @@ bots.patch("/:botId", async (c) => {
       coin_packs: body.coin_packs,
       free_pass_hours: body.free_pass_hours,
     }),
+    adultSetting(bot, body.adult),
   );
 
   const providers = providerFields(body);
@@ -378,6 +388,9 @@ bots.patch("/:botId", async (c) => {
   }
 
   await updateBotSettings(c.env, bot, update, credentials);
+  const labelNotes = update.adult !== undefined && (update.adult === 1) !== bot.adult
+    ? adultNotes(await loadTenantBot(c.env, bot.id, tenant.id), update.adult === 1)
+    : [];
 
   // Switching join mode needs Telegram-side setup: do it now and report.
   if (update.join_mode !== undefined && update.join_mode !== bot.joinMode) {
@@ -388,10 +401,10 @@ bots.patch("/:botId", async (c) => {
       bot_id: bot.id,
       join_mode: fresh.joinMode,
       join_link: applied.joinLink,
-      ...(applied.notes.length ? { notes: applied.notes } : {}),
+      ...(applied.notes.length || labelNotes.length ? { notes: [...applied.notes, ...labelNotes] } : {}),
     });
   }
-  return c.json({ message: "Bot updated.", bot_id: bot.id });
+  return c.json({ message: "Bot updated.", bot_id: bot.id, ...(labelNotes.length ? { notes: labelNotes } : {}) });
 });
 
 // ── Delete ───────────────────────────────────────────────────────────────────

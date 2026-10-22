@@ -22,6 +22,8 @@ import { availableProviders, createPayment } from "../payments";
 import {
   applyJoinMode,
   coinAndJoinSettings,
+  adultNotes,
+  adultSetting,
   accountSummary,
   botDetail,
   findTenantPayment,
@@ -218,6 +220,10 @@ const UPDATE_BOT_INPUT = z.strictObject({
     .describe("Currency the prices are written in: USD, or the currency Paystack charges in (e.g. KES). Change prices to match when switching."),
   free_pass_hours: z.number().int().min(0).max(720).optional().describe("Free group access for newcomers, in hours (0 = off). When it ends, the bot asks them to pay to keep their spot."),
   image_unlock_price: price("Price of the image vault"),
+  adult: z
+    .boolean()
+    .optional()
+    .describe("Label the group adults-only. Paystack doesn't support adult content, so a labelled group takes crypto (NOWPayments or BTCPay) only. Legal content of consenting adults only."),
   welcome_title: z.string().trim().max(256).optional().describe("Heading of the payment menu newcomers see"),
   welcome_text: z.string().trim().max(2000).optional().describe("Text under the heading"),
   group_description: z.string().trim().max(2000).optional().describe("Optional line describing the group"),
@@ -409,6 +415,7 @@ function registerCreatorTools(server: McpServer, ctx: PaywallContext): void {
         revenue_usd: { gross: d.revenue.grossUsd, platform_fee: d.revenue.platformFeeUsd, net: d.revenue.netUsd },
         prices: d.prices,
         free_pass_hours: d.freePassHours,
+        adult: d.adult,
         paystack_currency: d.currency,
         paystack_rate_per_usd: d.fxRate,
         welcome_title: d.welcomeTitle,
@@ -431,6 +438,7 @@ function registerCreatorTools(server: McpServer, ctx: PaywallContext): void {
           `- Paying members: ${d.activeMembers}`,
           `- Plans: ${planList(d.prices)}; image vault ${d.prices.image_vault > 0 ? formatAmount(d.prices.currency, d.prices.image_vault) : "off"}`,
           `- Free pass for newcomers: ${d.freePassHours > 0 ? `${d.freePassHours} hours` : "off"}`,
+          ...(d.adult ? [`- Adults-only: yes, crypto payments only${d.adultLocked ? " (set by the platform)" : ""}`] : []),
           `- Paystack charges in ${d.currency} at ${d.fxRate} per USD`,
           `- Payment methods offered: ${d.paymentProviders.length ? d.paymentProviders.join(", ") : "none — buyers cannot pay"}`,
           `- Revenue: ${usd(d.revenue.grossUsd)} gross, ${usd(d.revenue.netUsd)} net`,
@@ -528,6 +536,7 @@ Examples:
           coin_packs: fields.coin_packs,
           free_pass_hours: fields.free_pass_hours,
         }),
+        adultSetting(b, fields.adult),
       );
       if (Object.keys(update).length === 0) {
         throw new HttpError(400, "Nothing to change: pass at least one setting, such as monthly_price or status.");
@@ -548,6 +557,9 @@ Examples:
         const applied = await applyJoinMode(env, fresh, ctx.baseUrl);
         if (applied.joinLink) extra += ` Share this link so people can ask to join: ${applied.joinLink}`;
         if (applied.notes.length) extra += ` ${applied.notes.join(" ")}`;
+      }
+      if (update.adult !== undefined && (update.adult === 1) !== b.adult) {
+        extra += ` ${adultNotes({ ...b, adult: update.adult === 1 }, update.adult === 1).join(" ")}`;
       }
       return text(`Updated ${botLabel(b)}: ${changed.join(", ")}.${extra}`);
     }),
