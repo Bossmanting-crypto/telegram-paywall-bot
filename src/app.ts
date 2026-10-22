@@ -14,6 +14,7 @@ import { bots } from "./routes/bots";
 import { payments } from "./routes/payments";
 import { tenants } from "./routes/tenants";
 import { btcpayWebhook, nowpaymentsWebhook, paystackWebhook, webhooks } from "./routes/webhooks";
+import { web } from "./routes/web";
 import { ensureReady } from "./schema";
 import type { TgUpdate } from "./telegram";
 
@@ -56,12 +57,16 @@ app.use(
   }),
 );
 
+// Browsers get the landing page and dashboard; API clients get JSON on /.
+app.route("/", web);
+
 app.get("/", (c) =>
   c.json({
     service: "Paywall Bot SaaS",
     version: VERSION,
     status: "online",
     admin: "/admin",
+    dashboard: "/dashboard",
     api: "/api/v1",
   }),
 );
