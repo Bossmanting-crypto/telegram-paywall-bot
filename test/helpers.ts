@@ -145,7 +145,7 @@ export function mockFetch(): Mock {
 export async function resetDatabase(): Promise<void> {
   await ensureReady(env);
   await env.DB.batch(
-    ["broadcasts", "vault_images", "payments", "members", "bots", "tenants"].map((table) =>
+    ["broadcasts", "coin_ledger", "content_unlocks", "vault_images", "payments", "members", "bots", "tenants"].map((table) =>
       env.DB.prepare(`DELETE FROM ${table}`),
     ),
   );

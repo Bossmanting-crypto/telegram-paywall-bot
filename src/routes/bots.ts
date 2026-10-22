@@ -17,7 +17,9 @@ import {
 import { availableProviders } from "../payments";
 import { isAcceptableServerUrl } from "../providers/btcpay";
 import {
+  applyJoinMode,
   botDetail,
+  coinAndJoinSettings,
   grantAccess,
   listBots,
   listMembers,
@@ -277,6 +279,15 @@ bots.get("/:botId", async (c) => {
     group_description: d.groupDescription,
     admin_user_ids: d.adminUserIds,
     payment_providers: d.paymentProviders,
+    join_mode: d.joinMode,
+    join_link: d.joinLink,
+    coins: {
+      enabled: d.coins.enabled,
+      free_coins: d.coins.freeCoins,
+      unlock_cost: d.coins.unlockCost,
+      packs: d.coins.packs,
+    },
+    content_items: d.contentItems,
     credentials: d.credentials,
     webhooks: d.webhooks,
     created_at: d.createdAt,
@@ -333,6 +344,17 @@ bots.patch("/:botId", async (c) => {
     update.status = status;
   }
 
+  Object.assign(
+    update,
+    coinAndJoinSettings({
+      join_mode: body.join_mode,
+      coins_enabled: body.coins_enabled,
+      free_coins: body.free_coins,
+      unlock_cost: body.unlock_cost,
+      coin_packs: body.coin_packs,
+    }),
+  );
+
   const providers = providerFields(body);
   const sentProviderField = Object.values(providers).some((v) => v !== undefined);
   if (sentProviderField && bot.isOwner) {
@@ -346,6 +368,19 @@ bots.patch("/:botId", async (c) => {
   }
 
   await updateBotSettings(c.env, bot, update, credentials);
+
+  // Switching join mode needs Telegram-side setup: do it now and report.
+  if (update.join_mode !== undefined && update.join_mode !== bot.joinMode) {
+    const fresh = await loadTenantBot(c.env, bot.id, tenant.id);
+    const applied = await applyJoinMode(c.env, fresh, baseUrl(c));
+    return c.json({
+      message: "Bot updated.",
+      bot_id: bot.id,
+      join_mode: fresh.joinMode,
+      join_link: applied.joinLink,
+      ...(applied.notes.length ? { notes: applied.notes } : {}),
+    });
+  }
   return c.json({ message: "Bot updated.", bot_id: bot.id });
 });
 

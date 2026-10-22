@@ -76,7 +76,7 @@ describe("setup", () => {
       url: "https://paywall.test/telegram/owner",
       secret_token: await ownerWebhookSecret(),
     });
-    expect(hook?.body?.allowed_updates).toEqual(["message", "callback_query", "chat_member", "my_chat_member"]);
+    expect(hook?.body?.allowed_updates).toEqual(["message", "callback_query", "chat_member", "my_chat_member", "chat_join_request"]);
 
     expect(res.body).toMatchObject({
       ok: true,

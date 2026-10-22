@@ -19,15 +19,17 @@ import {
   vaultUnlockStatement,
   type AccessType,
   type BotConfig,
+  type PaymentKind,
   type PaymentRow,
   type Provider,
 } from "./db";
+import { balance, coinPurchaseStatements, sendContent, type ContentItem } from "./coins";
 import { newId, randomHex } from "./lib/crypto";
 import { HttpError, log, logError, round2 } from "./lib/http";
 import * as btcpay from "./providers/btcpay";
 import * as nowpayments from "./providers/nowpayments";
 import * as paystack from "./providers/paystack";
-import { restrictMember, sendMessage, tg, unrestrictMember } from "./telegram";
+import { restrictMember, sendMessage, tg, TelegramError, unrestrictMember, type InlineKeyboard } from "./telegram";
 
 export const ACCESS_LABEL: Record<AccessType, string> = {
   one_time: "One-Time Access",
@@ -56,7 +58,7 @@ export interface CreatedPayment {
   paymentUrl: string;
   orderId: string;
   provider: Provider;
-  accessType: AccessType;
+  accessType: PaymentKind;
   amount: number;
   platformFee: number;
   net: number;
@@ -99,11 +101,66 @@ export async function createPayment(
     }
   }
 
+  return startPayment(env, bot, {
+    telegramId: opts.telegramId,
+    kind: opts.accessType,
+    amount,
+    coins: null,
+    description: `${bot.welcomeTitle} — ${ACCESS_LABEL[opts.accessType]}`,
+    provider: opts.provider,
+    baseUrl: opts.baseUrl,
+    email: opts.email,
+  });
+}
+
+/** Payment link for coin pack number `packIndex` (0-based). */
+export async function createCoinPayment(
+  env: AppEnv,
+  bot: BotConfig,
+  opts: { telegramId: number; packIndex: number; provider: Provider; baseUrl: string },
+): Promise<CreatedPayment & { coins: number }> {
+  if (!botIsSelling(bot)) {
+    throw new HttpError(409, "This bot is not accepting payments right now.");
+  }
+  if (!bot.coins.enabled) throw new HttpError(400, "Coins are not turned on for this bot.");
+  const pack = bot.coins.packs[opts.packIndex];
+  if (!pack) throw new HttpError(400, "That coin pack doesn't exist.");
+  if (!availableProviders(bot).includes(opts.provider)) {
+    throw new HttpError(400, `Provider '${opts.provider}' not configured for this bot.`);
+  }
+  const created = await startPayment(env, bot, {
+    telegramId: opts.telegramId,
+    kind: "coin_pack",
+    amount: pack.price,
+    coins: pack.coins,
+    description: `${bot.welcomeTitle} — ${pack.coins} coins`,
+    provider: opts.provider,
+    baseUrl: opts.baseUrl,
+    email: null,
+  });
+  return { ...created, coins: pack.coins };
+}
+
+async function startPayment(
+  env: AppEnv,
+  bot: BotConfig,
+  opts: {
+    telegramId: number;
+    kind: PaymentKind;
+    amount: number;
+    coins: number | null;
+    description: string;
+    provider: Provider;
+    baseUrl: string;
+    email?: string | null;
+  },
+): Promise<CreatedPayment> {
+  const amount = opts.amount;
   const platformFee = round2(amount * bot.platformCut);
   const net = round2(amount - platformFee);
   // Paystack references may only contain letters, digits, "-", "." and "=".
   const orderId = `${opts.telegramId}-${randomHex(6)}`;
-  const description = `${bot.welcomeTitle} — ${ACCESS_LABEL[opts.accessType]}`;
+  const description = opts.description;
   const successUrl = `${opts.baseUrl}/payment/success`;
   const cancelUrl = `${opts.baseUrl}/payment/cancel`;
 
@@ -117,8 +174,8 @@ export async function createPayment(
     `INSERT INTO payments
        (id, tenant_id, bot_id, telegram_id, provider, provider_ref, access_type,
         gross_amount, platform_fee, net_amount, currency,
-        charge_amount_minor, charge_currency, status, created_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'USD', ?11, ?12, 'pending', ?13)`,
+        charge_amount_minor, charge_currency, status, created_at, coins)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'USD', ?11, ?12, 'pending', ?13, ?14)`,
   )
     .bind(
       paymentId,
@@ -127,13 +184,14 @@ export async function createPayment(
       opts.telegramId,
       opts.provider,
       orderId,
-      opts.accessType,
+      opts.kind,
       amount,
       platformFee,
       net,
       chargeMinor,
       chargeCurrency,
       now(),
+      opts.coins,
     )
     .run();
 
@@ -193,7 +251,7 @@ export async function createPayment(
     paymentUrl,
     orderId,
     provider: opts.provider,
-    accessType: opts.accessType,
+    accessType: opts.kind,
     amount,
     platformFee,
     net,
@@ -221,17 +279,19 @@ export function findPaymentByInvoice(
  */
 export async function confirmPayment(env: AppEnv, payment: PaymentRow): Promise<boolean> {
   const grant =
-    payment.access_type === "image_unlock"
-      ? vaultUnlockStatement(env, payment.bot_id, payment.telegram_id, payment.id)
-      : memberGrantStatement(env, payment.bot_id, payment.telegram_id, payment.access_type, payment.id);
+    payment.access_type === "coin_pack"
+      ? coinPurchaseStatements(env, payment)
+      : payment.access_type === "image_unlock"
+        ? [vaultUnlockStatement(env, payment.bot_id, payment.telegram_id, payment.id)]
+        : [memberGrantStatement(env, payment.bot_id, payment.telegram_id, payment.access_type, payment.id)];
 
   const results = await env.DB.batch([
-    grant,
+    ...grant,
     env.DB.prepare(
       "UPDATE payments SET status = 'confirmed', confirmed_at = ?1 WHERE id = ?2 AND status = 'pending'",
     ).bind(now(), payment.id),
   ]);
-  const confirmed = (results[1]?.meta.changes ?? 0) === 1;
+  const confirmed = (results[grant.length]?.meta.changes ?? 0) === 1;
   if (confirmed) {
     log("payment confirmed", {
       order_id: payment.provider_ref,
@@ -239,6 +299,7 @@ export async function confirmPayment(env: AppEnv, payment: PaymentRow): Promise<
       bot_id: payment.bot_id,
       telegram_id: payment.telegram_id,
       access_type: payment.access_type,
+      ...(payment.coins ? { coins: payment.coins } : {}),
     });
   }
   return confirmed;
@@ -254,9 +315,24 @@ export async function deliverAccess(
   env: AppEnv,
   bot: BotConfig,
   telegramId: number,
-  accessType: AccessType | "manual_grant",
+  accessType: PaymentKind | "manual_grant",
+  coins: number | null = null,
 ): Promise<void> {
   if (!bot.token) return;
+  if (accessType === "coin_pack") {
+    try {
+      const left = await balance(env, bot.id, telegramId);
+      await sendMessage(
+        bot.token,
+        telegramId,
+        `🪙 <b>Payment confirmed!</b> ${coins ?? 0} coins added.\n\nYour balance: <b>${left} coins</b>.`,
+        { reply_markup: { inline_keyboard: [[{ text: "📸 Browse content", callback_data: "c:0" }]] } },
+      );
+    } catch (error) {
+      logError("could not notify coin buyer", error, { bot_id: bot.id, telegram_id: telegramId });
+    }
+    return;
+  }
   if (accessType === "image_unlock") {
     try {
       await deliverVault(env, bot, telegramId);
@@ -270,41 +346,97 @@ export async function deliverAccess(
       await unrestrictMember(bot.token, bot.groupChatId, telegramId);
     }
   } catch (error) {
-    logError("could not unlock member in Telegram", error, { bot_id: bot.id, telegram_id: telegramId });
+    // Expected in approve mode when the buyer isn't in the group yet.
+    if (bot.joinMode !== "approve") {
+      logError("could not unlock member in Telegram", error, { bot_id: bot.id, telegram_id: telegramId });
+    }
+  }
+
+  let text =
+    accessType === "manual_grant"
+      ? "✅ <b>Access granted!</b> You now have full access to the group. 🎉"
+      : "✅ <b>Payment confirmed!</b> You're in! 🎉\n\nHead back to the group — you now have full access. 🔥";
+  let keyboard: InlineKeyboard | undefined;
+  if (bot.joinMode === "approve" && bot.groupChatId) {
+    const admitted = await admitToGroup(bot, telegramId);
+    if (admitted.approved) {
+      text = `${accessType === "manual_grant" ? "✅ <b>Access granted!</b>" : "✅ <b>Payment confirmed!</b>"} Your request to join was approved. Open the group from your chat list. 🎉`;
+    } else if (admitted.inviteLink) {
+      text = `${accessType === "manual_grant" ? "✅ <b>Access granted!</b>" : "✅ <b>Payment confirmed!</b>"} Tap below to join the group. The link works once, for you only. 🎉`;
+      keyboard = { inline_keyboard: [[{ text: "🚪 Join the group", url: admitted.inviteLink }]] };
+    }
   }
   try {
-    await sendMessage(
-      bot.token,
-      telegramId,
-      accessType === "manual_grant"
-        ? "✅ <b>Access granted!</b> You now have full access to the group. 🎉"
-        : "✅ <b>Payment confirmed!</b> You're in! 🎉\n\nHead back to the group — you now have full access. 🔥",
-    );
+    await sendMessage(bot.token, telegramId, text, keyboard ? { reply_markup: keyboard } : {});
   } catch (error) {
     logError("could not notify member", error, { bot_id: bot.id, telegram_id: telegramId });
   }
 }
 
-/** Put the unpaid restriction back on a member. Never throws. */
-export async function removeAccess(bot: BotConfig, telegramId: number): Promise<void> {
-  if (!bot.token || !bot.groupChatId) return;
+/**
+ * Approve mode: let a paying member into the group. Approves their pending
+ * join request if there is one; otherwise creates a single-use invite link
+ * that expires in a day. Never throws.
+ */
+export async function admitToGroup(
+  bot: BotConfig,
+  telegramId: number,
+): Promise<{ approved: boolean; inviteLink: string | null }> {
+  if (!bot.token || !bot.groupChatId) return { approved: false, inviteLink: null };
   try {
-    await restrictMember(bot.token, bot.groupChatId, telegramId);
+    await tg(bot.token, "approveChatJoinRequest", { chat_id: bot.groupChatId, user_id: telegramId });
+    return { approved: true, inviteLink: null };
   } catch (error) {
-    logError("could not restrict member in Telegram", error, { bot_id: bot.id, telegram_id: telegramId });
+    if (!(error instanceof TelegramError)) {
+      logError("could not approve join request", error, { bot_id: bot.id, telegram_id: telegramId });
+    }
+    // No pending request (or already a member): fall through to a link.
+  }
+  try {
+    const link = await tg<{ invite_link: string }>(bot.token, "createChatInviteLink", {
+      chat_id: bot.groupChatId,
+      name: `Paid ${telegramId}`.slice(0, 32),
+      member_limit: 1,
+      expire_date: now() + 86400,
+    });
+    return { approved: false, inviteLink: link.invite_link };
+  } catch (error) {
+    logError("could not create invite link", error, { bot_id: bot.id, telegram_id: telegramId });
+    return { approved: false, inviteLink: null };
   }
 }
 
-/** Send every vault image to the buyer, in albums of ten. */
+/**
+ * Take group access away. Mute mode: put the unpaid restriction back.
+ * Approve mode: remove them from the group (ban, then unban straight away so
+ * they can ask to join again after renewing). Never throws.
+ */
+export async function removeAccess(bot: BotConfig, telegramId: number): Promise<void> {
+  if (!bot.token || !bot.groupChatId) return;
+  try {
+    if (bot.joinMode === "approve") {
+      await tg(bot.token, "banChatMember", { chat_id: bot.groupChatId, user_id: telegramId });
+      await tg(bot.token, "unbanChatMember", { chat_id: bot.groupChatId, user_id: telegramId, only_if_banned: true });
+    } else {
+      await restrictMember(bot.token, bot.groupChatId, telegramId);
+    }
+  } catch (error) {
+    logError("could not remove member access in Telegram", error, { bot_id: bot.id, telegram_id: telegramId });
+  }
+}
+
+/** Send every vault item to the buyer: photos and videos in albums of ten, the rest one by one. */
 export async function deliverVault(env: AppEnv, bot: BotConfig, telegramId: number): Promise<number> {
-  const { results } = await env.DB.prepare(
-    // rowid keeps the order the images were added in, even within one second.
-    "SELECT file_id FROM vault_images WHERE bot_id = ?1 ORDER BY rowid LIMIT ?2",
+  const { results: all } = await env.DB.prepare(
+    // rowid keeps the order the items were added in, even within one second.
+    "SELECT id, file_id, kind, caption FROM vault_images WHERE bot_id = ?1 ORDER BY rowid LIMIT ?2",
   )
     .bind(bot.id, MAX_VAULT_IMAGES)
-    .all<{ file_id: string }>();
+    .all<ContentItem>();
+  const results = all.filter((item) => item.kind === "photo" || item.kind === "video" || !item.kind);
+  const singles = all.filter((item) => item.kind === "animation" || item.kind === "document");
 
-  if (results.length === 0) {
+  if (all.length === 0) {
     await sendMessage(
       bot.token,
       telegramId,
@@ -316,20 +448,23 @@ export async function deliverVault(env: AppEnv, bot: BotConfig, telegramId: numb
   await sendMessage(
     bot.token,
     telegramId,
-    `🖼 <b>Vault unlocked!</b> Sending ${results.length} image${results.length === 1 ? "" : "s"}…`,
+    `🖼 <b>Vault unlocked!</b> Sending ${all.length} item${all.length === 1 ? "" : "s"}…`,
   );
   for (let i = 0; i < results.length; i += 10) {
     const chunk = results.slice(i, i + 10);
     const first = chunk[0];
     if (chunk.length === 1 && first) {
-      await tg(bot.token, "sendPhoto", { chat_id: telegramId, photo: first.file_id, protect_content: true });
+      await sendContent(bot, telegramId, first, null);
     } else {
       await tg(bot.token, "sendMediaGroup", {
         chat_id: telegramId,
-        media: chunk.map((img) => ({ type: "photo", media: img.file_id })),
+        media: chunk.map((item) => ({ type: item.kind === "video" ? "video" : "photo", media: item.file_id })),
         protect_content: true,
       });
     }
   }
-  return results.length;
+  for (const item of singles) {
+    await sendContent(bot, telegramId, item, null);
+  }
+  return all.length;
 }

@@ -24,6 +24,9 @@ import { FREE_TRIAL_DAYS, OWNER_ID, TIER_CUT, type AppEnv, type Settings } from 
 import { maskSecret, newId } from "./lib/crypto";
 import { HttpError, round2 } from "./lib/http";
 import { availableProviders, deliverAccess, removeAccess, webhookUrl } from "./payments";
+import { countContent } from "./coins";
+import { ensureJoinLink, registerWebhook } from "./group";
+import { MAX_COIN_PACKS } from "./db";
 
 export type WaitUntil = (promise: Promise<unknown>) => void;
 
@@ -207,6 +210,10 @@ export interface BotDetail {
   groupDescription: string | null;
   adminUserIds: number[];
   paymentProviders: string[];
+  joinMode: "mute" | "approve";
+  joinLink: string | null;
+  coins: { enabled: boolean; freeCoins: number; unlockCost: number; packs: Array<{ coins: number; price: number }> };
+  contentItems: number;
   credentials: {
     paystack_secret_key: string | null;
     nowpayments_api_key: string | null;
@@ -252,6 +259,15 @@ export async function botDetail(env: AppEnv, bot: BotConfig, base: string): Prom
     groupDescription: bot.groupDescription,
     adminUserIds: bot.adminIds,
     paymentProviders: availableProviders(bot),
+    joinMode: bot.joinMode,
+    joinLink: bot.joinLink,
+    coins: {
+      enabled: bot.coins.enabled,
+      freeCoins: bot.coins.free,
+      unlockCost: bot.coins.unlockCost,
+      packs: bot.coins.packs,
+    },
+    contentItems: await countContent(env, bot.id),
     // Keys are never returned in full — only enough to recognise which one is in use.
     credentials: {
       paystack_secret_key: maskSecret(bot.paystack?.secretKey),
@@ -279,6 +295,12 @@ export interface BotSettingsUpdate {
   group_chat_id?: number;
   admin_user_ids?: string | null;
   status?: "active" | "paused";
+  join_mode?: "mute" | "approve";
+  coins_enabled?: 0 | 1;
+  free_coins?: number;
+  unlock_cost?: number;
+  /** JSON list of {coins, price}. */
+  coin_packs?: string;
 }
 
 const OWNER_ENV_OVERRIDES: ReadonlyArray<readonly [keyof BotSettingsUpdate, keyof Settings]> = [
@@ -331,6 +353,85 @@ export async function updateBotSettings(
   return names;
 }
 
+// ── Coins and join approval ──────────────────────────────────────────────────
+
+export interface CoinAndJoinInput {
+  join_mode?: unknown;
+  coins_enabled?: unknown;
+  free_coins?: unknown;
+  unlock_cost?: unknown;
+  coin_packs?: unknown;
+}
+
+function wholeNumber(value: unknown, field: string, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < min || value > max) {
+    throw new HttpError(422, `'${field}' must be a whole number from ${min} to ${max}.`);
+  }
+  return value;
+}
+
+/** Validate the coin and join settings shared by the REST API and MCP. */
+export function coinAndJoinSettings(input: CoinAndJoinInput): BotSettingsUpdate {
+  const out: BotSettingsUpdate = {};
+  if (input.join_mode !== undefined) {
+    if (input.join_mode !== "mute" && input.join_mode !== "approve") {
+      throw new HttpError(422, "'join_mode' must be 'mute' or 'approve'.");
+    }
+    out.join_mode = input.join_mode;
+  }
+  if (input.coins_enabled !== undefined) {
+    if (typeof input.coins_enabled !== "boolean") throw new HttpError(422, "'coins_enabled' must be true or false.");
+    out.coins_enabled = input.coins_enabled ? 1 : 0;
+  }
+  if (input.free_coins !== undefined) out.free_coins = wholeNumber(input.free_coins, "free_coins", 0, 100000);
+  if (input.unlock_cost !== undefined) out.unlock_cost = wholeNumber(input.unlock_cost, "unlock_cost", 1, 100000);
+  if (input.coin_packs !== undefined) {
+    if (!Array.isArray(input.coin_packs) || input.coin_packs.length > MAX_COIN_PACKS) {
+      throw new HttpError(422, `'coin_packs' must be a list of up to ${MAX_COIN_PACKS} packs.`);
+    }
+    const packs = input.coin_packs.map((raw, i) => {
+      const pack = (raw ?? {}) as { coins?: unknown; price?: unknown };
+      const coins = wholeNumber(pack.coins, `coin_packs[${i}].coins`, 1, 1000000);
+      if (typeof pack.price !== "number" || !Number.isFinite(pack.price) || pack.price < 0.5 || pack.price > 100000) {
+        throw new HttpError(422, `'coin_packs[${i}].price' must be a price in USD from 0.50 to 100000.`);
+      }
+      return { coins, price: round2(pack.price) };
+    });
+    out.coin_packs = JSON.stringify(packs);
+  }
+  return out;
+}
+
+/**
+ * After join_mode changes: re-register the webhook so Telegram sends join
+ * requests, and in approve mode make sure there is a join-request link.
+ * Returns the link and any setup problems in plain words. Never throws.
+ */
+export async function applyJoinMode(
+  env: AppEnv,
+  bot: BotConfig,
+  base: string,
+): Promise<{ joinLink: string | null; notes: string[] }> {
+  const notes: string[] = [];
+  if (!bot.token) return { joinLink: null, notes };
+  try {
+    await registerWebhook(bot, base);
+  } catch {
+    notes.push("Couldn't update the Telegram webhook. Run the connection check, or run setup again.");
+  }
+  if (bot.joinMode !== "approve") return { joinLink: bot.joinLink, notes };
+  if (!bot.groupChatId) {
+    notes.push("Add the bot to your group as an admin; the join link is created once the group is linked.");
+    return { joinLink: null, notes };
+  }
+  try {
+    return { joinLink: await ensureJoinLink(env, bot), notes };
+  } catch {
+    notes.push("Couldn't create the join link. Give the bot the 'Invite users via link' admin permission, then save again.");
+    return { joinLink: null, notes };
+  }
+}
+
 // ── Members ──────────────────────────────────────────────────────────────────
 
 export interface MemberView {
@@ -340,6 +441,7 @@ export interface MemberView {
   access_type: string | null;
   access_expires: string | null;
   images_unlocked: boolean;
+  coins: number;
   joined_at: string | null;
 }
 
@@ -351,6 +453,7 @@ export function memberView(m: MemberRow): MemberView {
     access_type: m.access_type,
     access_expires: iso(m.access_expires),
     images_unlocked: m.images_unlocked === 1,
+    coins: m.coins ?? 0,
     joined_at: iso(m.joined_at),
   };
 }
@@ -426,6 +529,7 @@ export interface PaymentView {
   telegram_id: number;
   provider: string;
   access_type: string;
+  coins: number | null;
   status: string;
   gross: number;
   platform_fee: number;
@@ -443,6 +547,7 @@ export function paymentView(p: PaymentRow): PaymentView {
     telegram_id: p.telegram_id,
     provider: p.provider,
     access_type: p.access_type,
+    coins: p.coins ?? null,
     status: p.status,
     gross: p.gross_amount,
     platform_fee: p.platform_fee,

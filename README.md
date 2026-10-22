@@ -87,7 +87,28 @@ Run setup again whenever you change a secret or the Worker's address.
 3. The provider notifies the Worker. The Worker checks the provider's signature and the amount paid, records the payment once, lifts the restriction and tells the buyer.
 4. Every minute a scheduled job removes access from monthly subscriptions that have run out and asks those members to renew.
 
-Because a restricted member can still read the group, this protects *posting*, not *viewing*. If the content itself is what you sell, keep the group's invite link private.
+Because a restricted member can still read the group, this protects *posting*, not *viewing*. If the content itself is what you sell, turn on **join approval** (below).
+
+### Join approval (only paying people get in)
+
+Set **Who can join** to *People ask to join* on the bot's page in the dashboard (API: `"join_mode": "approve"`).
+
+1. The bot needs two admin permissions in the group: **Ban users** and **Invite users via link**.
+2. When you switch it on, the bot creates a **join link**. It's shown in the dashboard; `/joinlink` in a private chat with the bot shows it too. Share that link and revoke your old invite links so nobody can skip payment.
+3. People who use the link ask to join. The bot messages them the payment menu and approves the request as soon as their payment is confirmed. Someone who pays without a pending request gets a single-use invite link instead.
+4. When a monthly plan runs out, the bot removes the member from the group and sends a **Renew** button. They can ask to join again after renewing.
+
+People already in the group before you switch it on are not affected. Unpaid people who still get in some other way are muted, as before.
+
+### Coins and pay-per-item content
+
+Turn on **Coins** on the bot's page (API: `coins_enabled`, `free_coins`, `unlock_cost`, `coin_packs`).
+
+- **Content:** bot admins send photos, videos, GIFs or files to the bot in a private chat. The caption becomes the teaser people see before unlocking. Content is sent with forwarding and saving blocked.
+- **Free allowance:** every Telegram account gets `free_coins` once (default 15, which is 3 unlocks at the default `unlock_cost` of 5).
+- **Packs:** up to three, default 50 coins for $3, 150 for $7 and 500 for $20. Coins never expire. Coin sales go through the same providers and carry the same platform fee as any other sale.
+- **Unlimited:** anyone with a monthly or lifetime plan (or who bought the vault) sees every item free, so when someone runs out of coins the bot offers the packs *and* the plans.
+- **Commands for buyers:** `/balance` shows coins and a Buy coins button; `/content` opens the content browser.
 
 ### Bot commands for admins
 
@@ -97,8 +118,10 @@ Because a restricted member can still read the group, this protects *posting*, n
 | `/grant <user_id>` | Give someone access for free. |
 | `/revoke <user_id>` | Remove someone's access. |
 | `/broadcast <message>` | Message every paying member (delivered in batches, about 20 a minute). |
-| `/vault` | Image vault status. Send photos to the bot privately to add them. |
+| `/vault` | Content status. Send photos, videos, GIFs or files to the bot privately to add them. |
 | `/clearvault` | Empty the vault. |
+| `/givecoins <user_id> <amount>` | Give someone coins (a negative amount takes them away). |
+| `/joinlink` | Show the join-request link (`/joinlink new` replaces it). |
 | `/id` | Show the chat ID and your user ID. |
 
 The **image vault** is a set of photos sold separately: once `IMAGE_UNLOCK_PRICE_USD` is above 0 and the vault has images, buyers see an extra button, and the bot sends them the images after payment.

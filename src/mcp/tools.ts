@@ -18,6 +18,8 @@ import type { AppEnv } from "../env";
 import { HttpError, ProviderError, logError, money } from "../lib/http";
 import { availableProviders, createPayment } from "../payments";
 import {
+  applyJoinMode,
+  coinAndJoinSettings,
   accountSummary,
   botDetail,
   findTenantPayment,
@@ -202,6 +204,18 @@ const UPDATE_BOT_INPUT = z.strictObject({
     .optional()
     .describe("Telegram user IDs allowed to use the bot's admin commands. Replaces the current list."),
   status: z.enum(["active", "paused"]).optional().describe("'paused' stops selling, 'active' resumes"),
+  join_mode: z
+    .enum(["mute", "approve"])
+    .optional()
+    .describe("'mute': anyone can join but stays muted until they pay. 'approve': people ask to join and are let in only after paying"),
+  coins_enabled: z.boolean().optional().describe("Turn coins on or off: a free allowance plus coin packs to unlock content one item at a time"),
+  free_coins: z.number().int().min(0).max(100000).optional().describe("Coins each new person gets once, for free"),
+  unlock_cost: z.number().int().min(1).max(100000).optional().describe("Coins needed to unlock one content item"),
+  coin_packs: z
+    .array(z.strictObject({ coins: z.number().int().min(1).max(1000000), price: z.number().min(0.5).max(100000).describe("USD") }))
+    .max(3)
+    .optional()
+    .describe("Up to 3 coin packs buyers can choose from. Replaces the current packs."),
       });
 
 const LIST_MEMBERS_INPUT = z.strictObject({
@@ -371,6 +385,10 @@ function registerCreatorTools(server: McpServer, ctx: PaywallContext): void {
         group_description: d.groupDescription,
         admin_user_ids: d.adminUserIds,
         payment_methods: d.paymentProviders,
+        join_mode: d.joinMode,
+        join_link: d.joinLink,
+        coins: d.coins,
+        content_items: d.contentItems,
         webhooks: d.webhooks,
       };
       return reply(response_format, data, () =>
@@ -387,6 +405,11 @@ function registerCreatorTools(server: McpServer, ctx: PaywallContext): void {
           `- Welcome: "${d.welcomeTitle}" — ${d.welcomeText}`,
           ...(d.groupDescription ? [`- Group description: ${d.groupDescription}`] : []),
           `- Bot admins (Telegram IDs): ${d.adminUserIds.length ? d.adminUserIds.join(", ") : "none"}`,
+          `- Joining: ${d.joinMode === "approve" ? `people ask to join and are let in after paying${d.joinLink ? ` (link: ${d.joinLink})` : ""}` : "anyone can join; unpaid members are muted"}`,
+          `- Content items: ${d.contentItems}`,
+          d.coins.enabled
+            ? `- Coins: on. ${d.coins.freeCoins} free for new people, ${d.coins.unlockCost} per item. Packs: ${d.coins.packs.map((p) => `${p.coins} for ${usd(p.price)}`).join(", ") || "none"}`
+            : "- Coins: off",
           "",
           "Webhook addresses for payment dashboards:",
           `- Paystack: ${d.webhooks.paystack}`,
@@ -430,14 +453,16 @@ function registerCreatorTools(server: McpServer, ctx: PaywallContext): void {
     "paywall_update_bot",
     {
       title: "Update bot settings",
-      description: `Change a bot's prices, welcome message, group description or admins, or pause and resume it. Only the fields you pass change.
+      description: `Change a bot's prices, welcome message, group description, admins, coins or join mode, or pause and resume it. Only the fields you pass change.
 
 Pausing stops the bot asking newcomers to pay and leaves the group open; paying members keep their access.
 Payment-provider keys cannot be changed here.
 
 Examples:
   - "Raise the monthly price to $8" -> monthly_price=8
-  - "Pause the bot" -> status="paused"`,
+  - "Pause the bot" -> status="paused"
+  - "Give new people 3 free unlocks at 5 coins each" -> coins_enabled=true, unlock_cost=5, free_coins=15
+  - "Only let people in after they pay" -> join_mode="approve"`,
       inputSchema: UPDATE_BOT_INPUT,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
@@ -452,6 +477,16 @@ Examples:
       if (fields.group_description !== undefined) update.group_description = fields.group_description || null;
       if (fields.status !== undefined) update.status = fields.status;
       if (admin_user_ids !== undefined) update.admin_user_ids = admin_user_ids.length ? admin_user_ids.join(",") : null;
+      Object.assign(
+        update,
+        coinAndJoinSettings({
+          join_mode: fields.join_mode,
+          coins_enabled: fields.coins_enabled,
+          free_coins: fields.free_coins,
+          unlock_cost: fields.unlock_cost,
+          coin_packs: fields.coin_packs,
+        }),
+      );
       if (Object.keys(update).length === 0) {
         throw new HttpError(400, "Nothing to change: pass at least one setting, such as monthly_price or status.");
       }
@@ -461,7 +496,14 @@ Examples:
         throw new HttpError(400, "At least one of one_time_price and monthly_price must stay above 0.");
       }
       const changed = await updateBotSettings(env, b, update);
-      return text(`Updated ${botLabel(b)}: ${changed.join(", ")}.`);
+      let extra = "";
+      if (update.join_mode !== undefined && update.join_mode !== b.joinMode) {
+        const fresh = await loadTenantBot(env, b.id, ctx.tenant.id);
+        const applied = await applyJoinMode(env, fresh, ctx.baseUrl);
+        if (applied.joinLink) extra += ` Share this link so people can ask to join: ${applied.joinLink}`;
+        if (applied.notes.length) extra += ` ${applied.notes.join(" ")}`;
+      }
+      return text(`Updated ${botLabel(b)}: ${changed.join(", ")}.${extra}`);
     }),
   );
 
